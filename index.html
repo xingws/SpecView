@@ -653,17 +653,25 @@ function renderSpec(track) {
   const win = new Float32Array(FFT_SIZE);
   for (let i = 0; i < FFT_SIZE; i++) win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (FFT_SIZE - 1)));
 
-  const hop   = FFT_SIZE / HOP_DIV;
   const nBins = (FFT_SIZE >> 1) + 1;
   const binHz = sr / FFT_SIZE;
 
   /* Cap display to native Nyquist — ignore bins above it */
   const maxBin = Math.min(nBins - 1, Math.ceil(nyquist / binHz));
 
-  /* Only compute as many frames as we have pixel columns */
-  const maxFrames = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+  /* Adaptive hop: use smaller hop for short files to fill the canvas width,
+     but never smaller than 1 sample and never larger than FFT_SIZE/HOP_DIV */
+  const defaultHop = FFT_SIZE / HOP_DIV;
+  const defaultFrames = Math.max(1, Math.floor((nS - FFT_SIZE) / defaultHop) + 1);
+  let hop, maxFrames;
+  if (defaultFrames < W && nS > FFT_SIZE) {
+    hop = Math.max(1, Math.floor((nS - FFT_SIZE) / (W - 1)));
+    maxFrames = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+  } else {
+    hop = defaultHop;
+    maxFrames = defaultFrames;
+  }
   const nF = Math.min(W, maxFrames);
-  const frameStep = maxFrames / W;
 
   const re = new Float64Array(FFT_SIZE);
   const im = new Float64Array(FFT_SIZE);
@@ -676,8 +684,7 @@ function renderSpec(track) {
   }
 
   for (let c = 0; c < nF; c++) {
-    const frame = Math.min(Math.round(c * frameStep), maxFrames - 1);
-    const off = frame * hop;
+    const off = c * hop;
 
     /* Window + load */
     for (let i = 0; i < FFT_SIZE; i++) {
@@ -1089,6 +1096,34 @@ function togglePlay() {
   else playActive();
 }
 
+/* Switch active lane within the current diff group (for A/B comparison) */
+function switchLane() {
+  const t = getActive(); if (!t || t.groupId == null) return;
+  const g = groups.find(g => g.id === t.groupId);
+  if (!g || g.trackIds.length < 2) return;
+
+  const idx = g.trackIds.indexOf(t.id);
+  const nextIdx = (idx + 1) % g.trackIds.length;
+  const nextTrack = tracks.find(tr => tr.id === g.trackIds[nextIdx]);
+  if (!nextTrack) return;
+
+  /* Capture current position */
+  const pos = getPos(t);
+
+  if (t.playing) stopSource(t);
+
+  /* Sync position to all siblings */
+  const sibs = getSiblings(nextTrack);
+  for (const s of sibs) s.offset = Math.max(0, Math.min(pos, s.duration));
+
+  setActive(nextTrack.id);
+
+  /* Always play the new lane */
+  audioCtx.resume();
+  playSource(nextTrack, nextTrack.offset);
+  startAnim();
+}
+
 function seek(time) {
   const t=getActive(); if(!t) return;
   time=Math.max(0,Math.min(time,t.duration));
@@ -1152,7 +1187,8 @@ btnClear.addEventListener('click',clearAll);
 
 document.addEventListener('keydown',e=>{
   if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
-  if(e.code==='Space'){e.preventDefault();togglePlay();}
+  if(e.code==='Space'&&e.shiftKey){e.preventDefault();switchLane();}
+  else if(e.code==='Space'){e.preventDefault();togglePlay();}
   if(e.code==='Escape'){e.preventDefault();stopAll();}
   if(e.code==='ArrowLeft'){e.preventDefault();const t=getActive();if(t)seek(getPos(t)-2);}
   if(e.code==='ArrowRight'){e.preventDefault();const t=getActive();if(t)seek(getPos(t)+2);}
