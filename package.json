@@ -1,0 +1,34 @@
+{
+  "name": "specview",
+  "version": "1.0.0",
+  "description": "Spectrogram viewer with audio classification",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.specview.app",
+    "productName": "SpecView",
+    "files": [
+      "main.js",
+      "index.html"
+    ],
+    "mac": {
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"]
+    }
+  }
+}
