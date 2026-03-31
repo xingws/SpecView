@@ -2,6 +2,8 @@
 
 A simple web-based spectrogram visualizer.
 
+**Live Demo**: https://richermans.github.io/SpecView/
+
 ## Features
 
 - **Spectrogram Visualization**: View audio files as spectrograms.
