@@ -204,11 +204,17 @@ body {
 .freq-labels {
   width: 44px; position: relative; flex-shrink: 0;
   background: #1a1a1a; border-right: 1px solid #333;
+  overflow: hidden;
 }
 .freq-label {
-  position: absolute; right: 4px; font-size: 8px; color: #aaa;
+  position: absolute; right: 4px; font-size: 8px; color: #999;
   font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
   transform: translateY(-50%); white-space: nowrap; pointer-events: none;
+  line-height: 1;
+}
+.freq-tick {
+  position: absolute; right: 0; width: 5px; height: 1px;
+  background: #444; pointer-events: none;
 }
 .spec-wrapper {
   position: relative; flex: 1; overflow: hidden; cursor: crosshair;
@@ -255,6 +261,21 @@ body {
 .tag-b { background: rgba(239,68,68,0.12); color: var(--red); }
 .tag-c { background: rgba(34,197,94,0.12); color: var(--green); }
 .tag-d { background: rgba(245,158,11,0.12); color: var(--orange); }
+/* ===== FULL-PAGE DROP OVERLAY ===== */
+.drop-overlay {
+  position: fixed; inset: 0; z-index: 999;
+  background: rgba(59,130,246,0.08);
+  border: 3px dashed var(--accent);
+  display: none;
+  align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.drop-overlay.visible { display: flex; }
+.drop-overlay-text {
+  background: var(--bg-card); color: var(--accent); font-size: 16px; font-weight: 600;
+  padding: 12px 28px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+  border: 1px solid var(--accent);
+}
 </style>
 </head>
 <body>
@@ -287,6 +308,7 @@ body {
 <input type="file" id="file-input" multiple accept="audio/*" hidden>
 
 <div id="tracks-container"></div>
+<div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop audio files anywhere</span></div>
 
 <script>
 (function() {
@@ -299,7 +321,6 @@ const FFT_SIZE    = 2048;
 const SPEC_H      = 220;
 const SPEC_H_DIFF = 180;
 const HOP_DIV     = 4;
-const F_MIN       = 30;     // Hz – log freq axis bottom
 const DB_RANGE    = 90;     // dB dynamic range
 
 /* Ocenaudio-style hot-metal colormap:
@@ -323,14 +344,29 @@ const COLORMAP = [
   [255,255,220],   // near-white
 ];
 
-const SUFFIX_PATTERNS = [
-  '_orig','_original','_ref','_reference','_gt','_ground_truth','_target',
-  '_pred','_predicted','_gen','_generated','_synth','_synthesized','_output',
-  '_recon','_reconstructed','_enhanced','_denoised','_clean','_noisy',
-  '_src','_source','_input','_baseline','_model',
-  '_v1','_v2','_v3','_v4','_a','_b','_c','_d'
+const KNOWN_TAGS = [
+  'orig','original','ref','reference','gt','ground_truth','target',
+  'pred','predicted','gen','generated','synth','synthesized','output',
+  'recon','reconstructed','enhanced','denoised','clean','noisy',
+  'src','source','input','baseline','model',
+  'v1','v2','v3','v4','a','b','c','d'
 ];
 const TAG_CSS = ['tag-a','tag-b','tag-c','tag-d'];
+
+/* Pre-bake colormap into a flat Uint8 LUT for fast pixel writes */
+const CMAP_LUT = new Uint8Array(256 * 3);
+(function() {
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    const p = t * (COLORMAP.length - 1);
+    const idx = Math.min(Math.floor(p), COLORMAP.length - 2);
+    const f = p - idx;
+    const a = COLORMAP[idx], b = COLORMAP[idx + 1];
+    CMAP_LUT[i * 3]     = Math.round(a[0] + (b[0] - a[0]) * f);
+    CMAP_LUT[i * 3 + 1] = Math.round(a[1] + (b[1] - a[1]) * f);
+    CMAP_LUT[i * 3 + 2] = Math.round(a[2] + (b[2] - a[2]) * f);
+  }
+})();
 
 /* ========================================================================
  *  DOM
@@ -361,47 +397,214 @@ volSlider.addEventListener('input', () => { gainNode.gain.value = volSlider.valu
 
 /* ========================================================================
  *  FILE HANDLING
+ *  When new files arrive, check against existing standalone tracks for
+ *  stem matches. If found, merge into a diff group.
  * ======================================================================== */
+
+/* Parse native sample rate from audio file headers */
+function parseNativeSampleRate(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  
+  /* WAV: check for RIFF header */
+  if (view.byteLength >= 28) {
+    const riff = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+    const wave = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11));
+    if (riff === 'RIFF' && wave === 'WAVE') {
+      /* Sample rate is at offset 24 (little-endian uint32) */
+      return view.getUint32(24, true);
+    }
+  }
+  
+  /* FLAC: check for fLaC header */
+  if (view.byteLength >= 22) {
+    const flac = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+    if (flac === 'fLaC') {
+      /* STREAMINFO block: sample rate is in bits 80-99 (20 bits) */
+      const byte10 = view.getUint8(18);
+      const byte11 = view.getUint8(19);
+      const byte12 = view.getUint8(20);
+      return ((byte10 << 12) | (byte11 << 4) | (byte12 >> 4));
+    }
+  }
+  
+  /* For other formats (MP3, OGG, etc.), return null and fall back to decoded rate */
+  return null;
+}
+
 async function handleFiles(fileList) {
   const ext = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
-  const batch = [];
+
+  /* Decode all files in parallel for speed */
+  const promises = [];
   for (const f of fileList) {
     if (!f.type.startsWith('audio/') && !ext.test(f.name)) continue;
-    try {
-      const buf = await f.arrayBuffer();
-      batch.push({ name: f.name, buffer: await audioCtx.decodeAudioData(buf) });
-    } catch(e) { console.error('Decode error:', f.name, e); }
+    promises.push(
+      f.arrayBuffer().then(arrBuf => {
+        const nativeSR = parseNativeSampleRate(arrBuf) || null;
+        return audioCtx.decodeAudioData(arrBuf.slice(0)).then(decoded => ({
+          name: f.name, buffer: decoded, nativeSR: nativeSR || decoded.sampleRate
+        }));
+      }).catch(e => { console.error('Decode error:', f.name, e); return null; })
+    );
   }
+  const batch = (await Promise.all(promises)).filter(Boolean);
   if (!batch.length) return;
-  for (const grp of groupByBaseName(batch)) {
-    if (grp.items.length === 1) createStandalone(grp.items[0].name, grp.items[0].buffer);
-    else createDiffGroup(grp.baseName, grp.items);
+
+  /* Group the new batch among themselves first */
+  const grouped = groupByBaseName(batch);
+
+  for (const grp of grouped) {
+    if (grp.items.length >= 2) {
+      /* batch already forms a group — but also check if existing standalone matches */
+      const existingMatch = findExistingStandaloneByStem(grp.baseName);
+      if (existingMatch) {
+        const oldTrack = existingMatch;
+        const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
+        removeTrackQuietly(oldTrack.id);
+        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR });
+      }
+      createDiffGroup(grp.baseName, grp.items);
+    } else {
+      /* single new file — check if an existing standalone or group matches its stem */
+      const newItem = grp.items[0];
+      const { stem, tag } = extractTag(stripExt(newItem.name));
+      const existingMatch = findExistingStandaloneByStem(stem);
+
+      if (existingMatch && tag) {
+        const oldTrack = existingMatch;
+        const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
+        removeTrackQuietly(oldTrack.id);
+        createDiffGroup(stem, [
+          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR },
+          { ...newItem, suffix: tag }
+        ]);
+      } else {
+        /* check if an existing diff group matches */
+        const existingGroup = findExistingGroupByStem(stem);
+        if (existingGroup && tag) {
+          addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
+        } else {
+          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR);
+        }
+      }
+    }
   }
   refreshUI();
 }
 
+/* Find a standalone track (not in any group) whose stem matches */
+function findExistingStandaloneByStem(stem) {
+  const key = stem.toLowerCase();
+  for (const t of tracks) {
+    if (t.groupId != null) continue;
+    const { stem: tStem } = extractTag(stripExt(t.name));
+    if (tStem.toLowerCase() === key) return t;
+  }
+  return null;
+}
+
+/* Find an existing diff group whose baseName stem matches */
+function findExistingGroupByStem(stem) {
+  const key = stem.toLowerCase();
+  for (const g of groups) {
+    if (g.baseName.toLowerCase() === key) return g;
+  }
+  return null;
+}
+
+/* Remove a track without triggering full UI refresh */
+function removeTrackQuietly(id) {
+  const i = tracks.findIndex(t => t.id === id);
+  if (i < 0) return;
+  const t = tracks[i];
+  if (t.playing) stopSource(t);
+  if (t.el) t.el.remove();
+  tracks.splice(i, 1);
+  if (activeTrackId === id) activeTrackId = null;
+}
+
+/* Add a new item to an existing diff group */
+function addToDiffGroup(grp, newItem) {
+  /* Easiest: remove the group, recreate with all items + the new one */
+  const existingItems = grp.trackIds.map(id => {
+    const t = tracks.find(tr => tr.id === id);
+    if (!t) return null;
+    const tag = extractTag(stripExt(t.name)).tag || t.name;
+    return { name: t.name, buffer: t.buffer, suffix: tag, nativeSR: t.nativeSR };
+  }).filter(Boolean);
+
+  removeDiffGroupQuietly(grp.id);
+  existingItems.push(newItem);
+  createDiffGroup(grp.baseName, existingItems);
+}
+
+function removeDiffGroupQuietly(gid) {
+  const gi = groups.findIndex(g => g.id === gid);
+  if (gi < 0) return;
+  const grp = groups[gi];
+  for (const tid of grp.trackIds) {
+    const ti = tracks.findIndex(t => t.id === tid);
+    if (ti >= 0) { if (tracks[ti].playing) stopSource(tracks[ti]); tracks.splice(ti, 1); }
+  }
+  grp.el.remove();
+  groups.splice(gi, 1);
+  if (activeTrackId && !tracks.find(t => t.id === activeTrackId)) activeTrackId = null;
+}
+
 /* ========================================================================
- *  SUFFIX GROUPING
+ *  STEM GROUPING — detects prefix OR suffix tags
+ *
+ *  Suffix: song_orig.wav, song_pred.wav         → stem "song"
+ *  Prefix: orig_song.wav, pred_song.wav         → stem "song"
+ *  Also supports '-' separator: song-orig.wav
+ *  Tags are matched from KNOWN_TAGS (longest first).
  * ======================================================================== */
 function stripExt(n) { return n.replace(/\.[^.]+$/, ''); }
-function findSuffix(noExt) {
+
+function extractTag(noExt) {
   const low = noExt.toLowerCase();
-  const sorted = SUFFIX_PATTERNS.slice().sort((a,b) => b.length - a.length);
-  for (const s of sorted) { if (low.endsWith(s)) return { base: noExt.slice(0,-s.length), suffix: noExt.slice(-s.length) }; }
-  return { base: noExt, suffix: '' };
+  /* sort longest first so 'ground_truth' beats 'gt' */
+  const sorted = KNOWN_TAGS.slice().sort((a,b) => b.length - a.length);
+
+  for (const tag of sorted) {
+    /* suffix: stem_tag  or  stem-tag */
+    const sufPat1 = '_' + tag;
+    const sufPat2 = '-' + tag;
+    if (low.endsWith(sufPat1)) {
+      return { stem: noExt.slice(0, -sufPat1.length), tag: noExt.slice(-tag.length), mode: 'suffix' };
+    }
+    if (low.endsWith(sufPat2)) {
+      return { stem: noExt.slice(0, -sufPat2.length), tag: noExt.slice(-tag.length), mode: 'suffix' };
+    }
+
+    /* prefix: tag_stem  or  tag-stem */
+    const prePat1 = tag + '_';
+    const prePat2 = tag + '-';
+    if (low.startsWith(prePat1)) {
+      return { stem: noExt.slice(prePat1.length), tag: noExt.slice(0, tag.length), mode: 'prefix' };
+    }
+    if (low.startsWith(prePat2)) {
+      return { stem: noExt.slice(prePat2.length), tag: noExt.slice(0, tag.length), mode: 'prefix' };
+    }
+  }
+
+  return { stem: noExt, tag: '', mode: 'none' };
 }
+
 function groupByBaseName(items) {
-  const m = new Map();
+  const m = new Map(); /* stemKey → { baseName, items[] } */
   for (const it of items) {
-    const { base, suffix } = findSuffix(stripExt(it.name));
-    const key = base.toLowerCase();
-    if (!m.has(key)) m.set(key, { baseName: base, items: [] });
-    m.get(key).items.push({ ...it, suffix });
+    const { stem, tag } = extractTag(stripExt(it.name));
+    const key = stem.toLowerCase();
+    if (!m.has(key)) m.set(key, { baseName: stem, items: [] });
+    m.get(key).items.push({ ...it, suffix: tag });
   }
   const out = [];
   for (const [, val] of m) {
+    /* only group if 2+ items with distinct tags */
     const uniq = new Set(val.items.map(i => i.suffix.toLowerCase()));
     if (val.items.length >= 2 && uniq.size >= 2) { out.push(val); continue; }
+    /* otherwise standalone */
     for (const it of val.items) out.push({ baseName: it.name, items: [it] });
   }
   return out;
@@ -430,90 +633,106 @@ function fftFwd(re, im, N) {
 }
 
 /* ========================================================================
- *  SPECTROGRAM RENDER  — Log-frequency STFT (ocenaudio style)
+ *  SPECTROGRAM RENDER  — Linear-frequency STFT (ocenaudio style)
  *
  *  Each canvas column = one FFT frame.
- *  Each pixel row maps to a frequency via log scale (F_MIN → Nyquist).
- *  We interpolate between FFT bins for smooth rendering.
+ *  Each pixel row maps linearly to a frequency bin (0 → Nyquist).
+ *  Performance: pre-baked colormap LUT, only compute as many FFT
+ *  frames as pixel columns, Float32 throughout.
  * ======================================================================== */
 function renderSpec(track) {
-  const { buffer, canvas } = track;
+  const { buffer, canvas, nyquist } = track;
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
+  if (W === 0 || H === 0) return;
   const sr = buffer.sampleRate;
-  const ny = sr / 2;
   const raw = buffer.numberOfChannels === 1 ? buffer.getChannelData(0) : mixDown(buffer);
   const nS = raw.length;
 
-  /* Hann window */
-  const win = new Float64Array(FFT_SIZE);
-  for (let i = 0; i < FFT_SIZE; i++) win[i] = 0.5 * (1 - Math.cos(2*Math.PI*i/(FFT_SIZE-1)));
+  /* Hann window (Float32 is fine) */
+  const win = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (FFT_SIZE - 1)));
 
-  const hop    = FFT_SIZE / HOP_DIV;
-  const nF     = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
-  const nBins  = FFT_SIZE / 2 + 1;
-  const binHz  = sr / FFT_SIZE;  // Hz per bin
+  const hop   = FFT_SIZE / HOP_DIV;
+  const nBins = (FFT_SIZE >> 1) + 1;
+  const binHz = sr / FFT_SIZE;
 
-  /* Pre-compute log-freq → bin mapping for each pixel row */
-  const logMin = Math.log(Math.max(F_MIN, 1));
-  const logMax = Math.log(ny);
-  const rowBin = new Float64Array(H);     // fractional bin index for each row
-  for (let y = 0; y < H; y++) {
-    /* y=0 → top (high freq), y=H-1 → bottom (low freq) */
-    const frac = 1 - y / (H - 1);  // 0=bottom, 1=top
-    const freq = Math.exp(logMin + frac * (logMax - logMin));
-    rowBin[y] = freq / binHz;
-  }
+  /* Cap display to native Nyquist — ignore bins above it */
+  const maxBin = Math.min(nBins - 1, Math.ceil(nyquist / binHz));
 
-  /* Compute full STFT magnitude in dB, then render per-column */
+  /* Only compute as many frames as we have pixel columns */
+  const maxFrames = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+  const nF = Math.min(W, maxFrames);
+  const frameStep = maxFrames / W;
+
   const re = new Float64Array(FFT_SIZE);
   const im = new Float64Array(FFT_SIZE);
-  const magDb = new Float64Array(nBins);
+  const colDb = new Float32Array(nF * H);
 
-  /* We'll track the global peak for normalization — two-pass approach:
-     Pass 1: compute all frames, find peak.
-     Pass 2: render pixels. To avoid storing all frames, we do single-pass
-     with a reasonable fixed reference: normalize per-frame against a running max,
-     then use a fixed dB floor. */
+  /* Pre-compute row → bin mapping (linear, 0 to maxBin) */
+  const rowBin = new Float32Array(H);
+  for (let y = 0; y < H; y++) {
+    rowBin[y] = (1 - y / (H - 1)) * maxBin;
+  }
 
-  /* For quality: store all frame magnitudes, then render. Memory: nF * nBins float64 */
-  const allMag = new Float64Array(nF * nBins);
+  for (let c = 0; c < nF; c++) {
+    const frame = Math.min(Math.round(c * frameStep), maxFrames - 1);
+    const off = frame * hop;
 
-  for (let f = 0; f < nF; f++) {
-    const off = f * hop;
-    for (let i = 0; i < FFT_SIZE; i++) { const idx=off+i; re[i]=idx<nS?raw[idx]*win[i]:0; im[i]=0; }
+    /* Window + load */
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const idx = off + i;
+      re[i] = idx < nS ? raw[idx] * win[i] : 0;
+      im[i] = 0;
+    }
     fftFwd(re, im, FFT_SIZE);
-    const base = f * nBins;
-    for (let k = 0; k < nBins; k++) {
-      const mag = Math.sqrt(re[k]*re[k] + im[k]*im[k]);
-      allMag[base + k] = mag > 1e-12 ? 20 * Math.log10(mag) : -140;
+
+    /* Magnitude in dB for each pixel row */
+    const base = c * H;
+    for (let y = 0; y < H; y++) {
+      const fb = rowBin[y];
+      const b0 = fb | 0;  /* fast floor */
+      const b1 = b0 < maxBin ? b0 + 1 : b0;
+      const t  = fb - b0;
+      const m0 = Math.sqrt(re[b0] * re[b0] + im[b0] * im[b0]);
+      const m1 = Math.sqrt(re[b1] * re[b1] + im[b1] * im[b1]);
+      const mag = m0 * (1 - t) + m1 * t;
+      colDb[base + y] = mag > 1e-12 ? 20 * Math.log10(mag) : -140;
     }
   }
 
   /* Find global peak */
   let peak = -Infinity;
-  for (let i = 0; i < allMag.length; i++) if (allMag[i] > peak) peak = allMag[i];
+  for (let i = 0; i < colDb.length; i++) if (colDb[i] > peak) peak = colDb[i];
+  const floor = peak - DB_RANGE;
+  const invRange = 1 / DB_RANGE;
 
-  /* Render pixels */
+  /* Render pixels using pre-baked LUT */
   const img = ctx.createImageData(W, H);
   const px  = img.data;
+  const px32 = new Uint32Array(px.buffer);  /* write 4 bytes at once */
+
+  /* Detect endianness for Uint32 writes */
+  const isLE = new Uint8Array(new Uint32Array([0x0A0B0C0D]).buffer)[0] === 0x0D;
 
   for (let x = 0; x < W; x++) {
-    const frame = Math.min(Math.floor(x / W * nF), nF - 1);
-    const base  = frame * nBins;
+    /* Map pixel column to closest computed column */
+    const col = Math.min(Math.round(x * nF / W), nF - 1);
+    const base = col * H;
 
     for (let y = 0; y < H; y++) {
-      /* Interpolate between bins for smooth log-frequency mapping */
-      const fb = rowBin[y];
-      const b0 = Math.max(0, Math.min(nBins - 1, Math.floor(fb)));
-      const b1 = Math.min(nBins - 1, b0 + 1);
-      const t  = fb - b0;
-      const db = allMag[base + b0] * (1 - t) + allMag[base + b1] * t;
-
-      const norm = Math.max(0, Math.min(1, (db - (peak - DB_RANGE)) / DB_RANGE));
-      const [r, g, b] = cmap(norm);
-      const o = (y * W + x) * 4;
-      px[o] = r; px[o+1] = g; px[o+2] = b; px[o+3] = 255;
+      const db = colDb[base + y];
+      /* Normalize to 0-255 LUT index */
+      let norm = (db - floor) * invRange;
+      if (norm < 0) norm = 0; else if (norm > 1) norm = 1;
+      const li = (norm * 255 + 0.5) | 0;
+      const ci = li * 3;
+      const o = y * W + x;
+      if (isLE) {
+        px32[o] = 0xFF000000 | (CMAP_LUT[ci + 2] << 16) | (CMAP_LUT[ci + 1] << 8) | CMAP_LUT[ci];
+      } else {
+        px32[o] = (CMAP_LUT[ci] << 24) | (CMAP_LUT[ci + 1] << 16) | (CMAP_LUT[ci + 2] << 8) | 0xFF;
+      }
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -527,26 +746,18 @@ function mixDown(buf) {
   return out;
 }
 
-function cmap(t) {
-  t = Math.max(0, Math.min(1, t));
-  const p = t * (COLORMAP.length - 1);
-  const i = Math.min(Math.floor(p), COLORMAP.length - 2);
-  const f = p - i;
-  const a = COLORMAP[i], b = COLORMAP[i+1];
-  return [
-    Math.round(a[0]+(b[0]-a[0])*f),
-    Math.round(a[1]+(b[1]-a[1])*f),
-    Math.round(a[2]+(b[2]-a[2])*f)
-  ];
-}
+/* cmap replaced by pre-baked CMAP_LUT */
 
 /* ========================================================================
  *  TRACK HELPERS
  * ======================================================================== */
-function mkTrack(name, buffer) {
-  const id=nextId++, dur=buffer.duration, sr=buffer.sampleRate, ny=sr/2;
+function mkTrack(name, buffer, nativeSR) {
+  const id=nextId++, dur=buffer.duration;
+  const displaySR = nativeSR || buffer.sampleRate;  // for "24.0kHz" label
+  const renderSR  = buffer.sampleRate;               // actual decoded data rate
+  const ny = displaySR / 2;                           // native Nyquist (display + render limit)
   return {
-    id, name, buffer, duration:dur, nyquist:ny, sr,
+    id, name, buffer, duration:dur, nyquist:ny, sr:displaySR, nativeSR:displaySR, renderSR,
     canvas:null, wrapper:null, ph:null, laneLabel:null,
     playing:false, startTime:0, offset:0, source:null,
     groupId:null, el:null
@@ -576,14 +787,19 @@ function buildSpecBody(track, h) {
     selectAndSeek(track, ratio * track.duration);
   });
 
-  /* Defer render until element is in the DOM so we can measure width */
+  /* Defer render until element is in the DOM so we can measure width.
+     Use setTimeout to yield to the browser so the loading spinner paints. */
   track._pendingRender = () => {
     const w = track.wrapper.clientWidth;
     if (w > 0) {
       track.canvas.width = w;
-      renderSpec(track);
+      setTimeout(() => {
+        renderSpec(track);
+        if (loading.parentNode) loading.remove();
+      }, 0);
+    } else {
+      if (loading.parentNode) loading.remove();
     }
-    if (loading.parentNode) loading.remove();
   };
   return el;
 }
@@ -625,8 +841,8 @@ function getSiblings(t) {
 /* ========================================================================
  *  STANDALONE TRACK
  * ======================================================================== */
-function createStandalone(name, buffer) {
-  const t = mkTrack(name, buffer);
+function createStandalone(name, buffer, nativeSR) {
+  const t = mkTrack(name, buffer, nativeSR);
   const chL = buffer.numberOfChannels===1?'Mono':buffer.numberOfChannels===2?'Stereo':buffer.numberOfChannels+'ch';
   const card = document.createElement('div');
   card.className = 'card'; card.dataset.trackId = t.id;
@@ -687,18 +903,19 @@ function createDiffGroup(baseName, items) {
   cols.className = 'diff-columns';
 
   items.forEach((item, idx) => {
-    const t = mkTrack(item.name, item.buffer);
+    const t = mkTrack(item.name, item.buffer, item.nativeSR);
     t.groupId = gid;
     const lane = document.createElement('div');
     lane.className = 'diff-lane';
 
     const lbl = document.createElement('div');
     lbl.className = 'diff-lane-label';
-    const tagText = item.suffix ? item.suffix.replace(/^_/,'') : ('Track '+(idx+1));
+    const tagText = item.suffix ? item.suffix : ('Track '+(idx+1));
     const tagCls  = TAG_CSS[idx % TAG_CSS.length];
     lbl.innerHTML =
       '<span class="diff-lane-tag '+tagCls+'">'+esc(tagText)+'</span>'+
       '<span class="diff-lane-name">'+esc(item.name)+'</span>'+
+      '<span class="card-info">'+(t.sr/1000).toFixed(1)+'kHz</span>'+
       '<span class="diff-lane-playing"></span>';
     lbl.addEventListener('click', () => { setActive(t.id); updateLaneHighlights(); });
     lane.appendChild(lbl);
@@ -716,7 +933,7 @@ function createDiffGroup(baseName, items) {
   card.appendChild(cols);
   card.appendChild(buildRuler(maxDur));
   tracksBox.appendChild(card);
-  groups.push({ id: gid, trackIds: grpTracks.map(t => t.id), el: card });
+  groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card });
   updateLaneHighlights();
   /* render all lanes after DOM insertion so wrappers have measured width */
   requestAnimationFrame(() => {
@@ -751,21 +968,60 @@ function updateLaneHighlights() {
 }
 
 /* ========================================================================
- *  FREQUENCY LABELS  (log scale, matching spectrogram rendering)
+ *  FREQUENCY LABELS  (linear scale, matching spectrogram rendering)
+ *  Dynamically culls labels that would overlap vertically.
  * ======================================================================== */
 function addFreqLabels(el, ny) {
-  const ticks = [50,100,200,500,1000,2000,4000,8000,16000,20000];
-  const logMin = Math.log(Math.max(F_MIN, 1));
-  const logMax = Math.log(ny);
-  for (const f of ticks) {
-    if (f < F_MIN || f > ny) continue;
-    /* same mapping as renderSpec: frac=0→bottom, frac=1→top, pct = (1-frac)*100 */
-    const frac = (Math.log(f) - logMin) / (logMax - logMin);
-    const pct  = (1 - frac) * 100;
-    const l = document.createElement('span');
-    l.className = 'freq-label'; l.style.top = pct + '%';
-    l.textContent = f >= 1000 ? (f/1000).toFixed(f%1000?1:0)+'k' : f+'';
-    el.appendChild(l);
+  const allTicks = [200,500,1000,2000,4000,8000,12000,16000,20000,24000];
+  const h = parseInt(el.style.height) || 220;
+  const MIN_GAP = 14; /* minimum px between label centers */
+
+  /* Always include a label for the Nyquist frequency at the top */
+  const candidates = [];
+  const nyText = ny >= 1000 ? (ny/1000).toFixed(ny%1000?1:0)+'k' : ny+'';
+  candidates.push({ f: ny, px: 5, text: nyText, priority: true });
+
+  /* Compute pixel positions for all candidate ticks (linear scale) */
+  for (const f of allTicks) {
+    if (f >= ny || f <= 0) continue;  /* skip if at or above nyquist (already added) */
+    const frac = f / ny;
+    const px   = (1 - frac) * h;
+    const text = f >= 1000 ? (f/1000).toFixed(f%1000?1:0)+'k' : f+'';
+    candidates.push({ f, px, text });
+  }
+
+  /* Greedily select labels that don't overlap.
+     Start with Nyquist (top, px=0), then add lower freqs bottom-up. */
+  /* Separate priority (Nyquist) from the rest */
+  const nyLabel = candidates.find(c => c.priority);
+  const rest = candidates.filter(c => !c.priority);
+  rest.sort((a,b) => b.px - a.px); /* bottom-up */
+
+  const selected = [];
+  if (nyLabel) { selected.push(nyLabel); }
+  let lastPx = nyLabel ? nyLabel.px : -Infinity;
+  /* Also track bottom boundary */
+  for (const c of rest) {
+    if (c.px < h - 6 && c.px > 6 && Math.abs(c.px - lastPx) >= MIN_GAP) {
+      selected.push(c);
+      lastPx = c.px;
+    }
+  }
+
+  /* Render ticks + labels */
+  for (const c of selected) {
+    const pct = (c.px / h * 100) + '%';
+    /* tick mark */
+    const tick = document.createElement('span');
+    tick.className = 'freq-tick';
+    tick.style.top = pct;
+    el.appendChild(tick);
+    /* label */
+    const lbl = document.createElement('span');
+    lbl.className = 'freq-label';
+    lbl.style.top = pct;
+    lbl.textContent = c.text;
+    el.appendChild(lbl);
   }
 }
 
@@ -880,12 +1136,15 @@ function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/
  *  EVENTS
  * ======================================================================== */
 dropZone.addEventListener('click',()=>fileInput.click());
-dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('dragover');});
-dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('dragover');handleFiles(e.dataTransfer.files);});
 fileInput.addEventListener('change',e=>{handleFiles(e.target.files);e.target.value='';});
-document.body.addEventListener('dragover',e=>e.preventDefault());
-document.body.addEventListener('drop',e=>{e.preventDefault();handleFiles(e.dataTransfer.files);});
+
+/* Full-page drag-and-drop */
+const dropOverlay = document.getElementById('drop-overlay');
+let dragCounter = 0;
+document.addEventListener('dragenter',e=>{e.preventDefault();dragCounter++;dropOverlay.classList.add('visible');});
+document.addEventListener('dragleave',e=>{e.preventDefault();dragCounter--;if(dragCounter<=0){dragCounter=0;dropOverlay.classList.remove('visible');}});
+document.addEventListener('dragover',e=>{e.preventDefault();});
+document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;dropOverlay.classList.remove('visible');if(e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);});
 
 btnPlay.addEventListener('click',togglePlay);
 btnStop.addEventListener('click',stopAll);
