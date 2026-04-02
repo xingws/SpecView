@@ -245,9 +245,10 @@ body {
 }
 .spec-wrapper canvas { display: block; width: 100%; }
 .playhead {
-  position: absolute; top: 0; width: 2px; height: 100%;
+  position: absolute; top: 0; left: 0; width: 2px; height: 100%;
   background: var(--playhead); pointer-events: none; z-index: 10;
   box-shadow: 0 0 6px var(--playhead-glow);
+  will-change: transform;
 }
 
 /* ===== TIME RULER ===== */
@@ -404,6 +405,7 @@ const SPEC_H      = 220;
 const SPEC_H_DIFF = 180;
 const HOP_DIV     = 4;
 const DB_RANGE    = 90;     // dB dynamic range
+const LAZY_THRESH = 10;     // ≥ this many files → lazy-load (decode on scroll into view)
 
 /* Ocenaudio-style hot-metal colormap:
    black → deep navy → blue → purple → magenta → red → orange → yellow → white */
@@ -480,6 +482,114 @@ let tracks = [], groups = [], nextId = 1, nextGrpId = 1;
 let activeTrackId = null, rafId = null;
 
 volSlider.addEventListener('input', () => { gainNode.gain.value = volSlider.value / 100; });
+
+/* ========================================================================
+ *  LAZY LOADING — IntersectionObserver
+ *  Cards with unloaded tracks are observed. When they enter the viewport
+ *  (+ 800px margin), their audio is decoded and spectrograms rendered.
+ * ======================================================================== */
+const lazyObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) loadCard(entry.target);
+  }
+}, { root: tracksBox, rootMargin: '800px 0px' });
+
+/* Decode + render all unloaded tracks belonging to a card element */
+async function loadCard(cardEl) {
+  lazyObserver.unobserve(cardEl);
+
+  /* Gather all unloaded tracks for this card */
+  const cardTracks = tracks.filter(t => t.el === cardEl && !t.loaded);
+  if (!cardTracks.length) return;
+
+  /* Decode each track sequentially (avoid flooding decodeAudioData) */
+  for (const t of cardTracks) {
+    await loadTrack(t);
+  }
+
+  /* Update card header info (duration, sample rate) */
+  updateCardInfo(cardEl);
+  refreshUI();
+}
+
+/* Decode a single lazy track: read file → parse SR → decode → render */
+async function loadTrack(t) {
+  if (t.loaded || !t.file) return;
+
+  /* Show spinner on this track's spectrogram */
+  const loadingEl = t.wrapper ? t.wrapper.querySelector('.loading-overlay') : null;
+  if (loadingEl) loadingEl.innerHTML = '<div class="spinner"></div>Decoding…';
+
+  try {
+    const arrBuf = await t.file.arrayBuffer();
+    const nativeSR = parseNativeSampleRate(arrBuf) || null;
+    const decoded = await audioCtx.decodeAudioData(arrBuf.slice(0));
+
+    /* Populate track fields */
+    t.buffer   = decoded;
+    t.loaded   = true;
+    t.duration = decoded.duration;
+    t.sr       = nativeSR || decoded.sampleRate;
+    t.nativeSR = t.sr;
+    t.renderSR = decoded.sampleRate;
+    t.nyquist  = t.sr / 2;
+    t.viewEnd  = decoded.duration;
+    t.file     = null;          /* release File reference to free memory */
+
+    /* Render spectrogram + waveform */
+    if (t.wrapper && t.canvas) {
+      const w = t.wrapper.clientWidth;
+      if (w > 0) {
+        t.canvas.width = w;
+        if (t.waveformCanvas) t.waveformCanvas.width = w;
+        /* Re-populate freq labels now that we know nyquist */
+        const freqEl = t.wrapper.parentElement
+          ? t.wrapper.parentElement.querySelector('.freq-labels')
+          : null;
+        if (freqEl) { freqEl.innerHTML = ''; addFreqLabels(freqEl, t.nyquist); }
+        renderSpec(t);
+        if (waveformVisible && t.waveformCanvas) drawWaveform(t);
+      }
+    }
+    if (loadingEl && loadingEl.parentNode) loadingEl.remove();
+    /* Update ruler */
+    updateRuler(t);
+  } catch(e) {
+    console.error('Lazy decode error:', t.name, e);
+    if (loadingEl) loadingEl.innerHTML = '<span style="color:#e74c3c;font-size:10px">Decode failed</span>';
+  }
+}
+
+/* Update a card's header info text after lazy tracks have loaded */
+function updateCardInfo(cardEl) {
+  const cardTracks = tracks.filter(t => t.el === cardEl);
+  if (!cardTracks.length) return;
+  const infoEl = cardEl.querySelector('.card-header .card-info');
+  if (!infoEl) return;
+
+  const gid = cardTracks[0].groupId;
+  if (gid != null) {
+    /* Diff group: show max duration */
+    const loaded = cardTracks.filter(t => t.loaded);
+    if (loaded.length) {
+      const maxDur = Math.max(...loaded.map(t => t.duration));
+      infoEl.textContent = fmt(maxDur);
+    }
+    /* Update per-lane sample rate labels */
+    for (const t of cardTracks) {
+      if (!t.loaded || !t.laneLabel) continue;
+      const srEl = t.laneLabel.querySelector('.card-info');
+      if (srEl) srEl.textContent = (t.sr/1000).toFixed(1)+'kHz';
+    }
+  } else {
+    /* Standalone: show channels + SR + duration */
+    const t = cardTracks[0];
+    if (t.loaded && t.buffer) {
+      const ch = t.buffer.numberOfChannels===1?'Mono':t.buffer.numberOfChannels===2?'Stereo':t.buffer.numberOfChannels+'ch';
+      infoEl.textContent = ch+' '+(t.sr/1000).toFixed(1)+'kHz | '+fmt(t.duration);
+    }
+  }
+}
 
 /* ========================================================================
  *  TAR / TAR.GZ ARCHIVE SUPPORT
@@ -564,7 +674,8 @@ function guessAudioMime(name) {
 }
 
 /* Process dropped items: separate tar archives from regular audio files,
-   extract audio from archives, then feed everything into handleFiles. */
+   extract audio from archives, then feed everything into handleFiles.
+   handleFiles() manages its own batch-loading progress overlay. */
 async function handleDroppedItems(fileList) {
   const regularFiles = [];
   const tarFiles = [];
@@ -582,31 +693,31 @@ async function handleDroppedItems(fileList) {
     return handleFiles(fileList);
   }
 
-  /* Show extraction progress */
+  /* Show extraction progress (tar decompression + parsing phase) */
   const overlay = document.getElementById('drop-overlay');
+  const overlayText = overlay.querySelector('.drop-overlay-text');
   overlay.classList.add('visible');
-  overlay.querySelector('.drop-overlay-text').textContent = 'Extracting audio from archive...';
+  overlayText.textContent = 'Extracting audio from archive...';
 
   try {
     for (const tf of tarFiles) {
       try {
-        overlay.querySelector('.drop-overlay-text').textContent =
-          'Extracting: ' + tf.name + '...';
+        overlayText.textContent = 'Extracting: ' + tf.name + '...';
         const arrBuf = await tf.arrayBuffer();
         const extracted = await extractAudioFromTar(arrBuf, tf.name);
         console.log('Extracted', extracted.length, 'audio files from', tf.name);
         for (const f of extracted) regularFiles.push(f);
       } catch (e) {
         console.error('Failed to extract tar:', tf.name, e);
-        /* Show brief error, then continue */
-        overlay.querySelector('.drop-overlay-text').textContent =
-          'Error extracting ' + tf.name + ': ' + (e.message || e);
+        overlayText.textContent = 'Error extracting ' + tf.name + ': ' + (e.message || e);
         await new Promise(r => setTimeout(r, 1500));
       }
     }
   } finally {
+    /* Hide the extraction overlay — handleFiles creates placeholder cards
+       instantly (lazy) or decodes eagerly for small sets. */
     overlay.classList.remove('visible');
-    overlay.querySelector('.drop-overlay-text').textContent = 'Drop audio files or archives anywhere';
+    overlayText.textContent = 'Drop audio files or archives anywhere';
   }
 
   if (regularFiles.length > 0) {
@@ -653,11 +764,16 @@ function parseNativeSampleRate(arrayBuffer) {
 async function handleFiles(fileList) {
   const ext = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
 
-  /* Decode all files in parallel for speed */
-  const promises = [];
+  /* Collect audio files only */
+  const audioFiles = [];
   for (const f of fileList) {
-    if (!f.type.startsWith('audio/') && !ext.test(f.name)) continue;
-    promises.push(
+    if (f.type.startsWith('audio/') || ext.test(f.name)) audioFiles.push(f);
+  }
+  if (!audioFiles.length) return;
+
+  if (audioFiles.length < LAZY_THRESH) {
+    /* ── EAGER PATH: decode all, then create cards ── */
+    const promises = audioFiles.map(f =>
       f.arrayBuffer().then(arrBuf => {
         const nativeSR = parseNativeSampleRate(arrBuf) || null;
         return audioCtx.decodeAudioData(arrBuf.slice(0)).then(decoded => ({
@@ -665,16 +781,25 @@ async function handleFiles(fileList) {
         }));
       }).catch(e => { console.error('Decode error:', f.name, e); return null; })
     );
+    const batch = (await Promise.all(promises)).filter(Boolean);
+    if (!batch.length) return;
+    const grouped = groupByBaseName(batch);
+    applyGrouped(grouped);
+    refreshUI();
+  } else {
+    /* ── LAZY PATH: create placeholder cards, decode on scroll ── */
+    const items = audioFiles.map(f => ({ name: f.name, buffer: null, nativeSR: null, file: f }));
+    const grouped = groupByBaseName(items);
+    applyGrouped(grouped);
+    refreshUI();
   }
-  const batch = (await Promise.all(promises)).filter(Boolean);
-  if (!batch.length) return;
+}
 
-  /* Group the new batch among themselves first */
-  const grouped = groupByBaseName(batch);
-
+/* Apply grouped items: merge with existing tracks or create new cards.
+   Items may have buffer=null (lazy) — createStandalone/createDiffGroup handle both. */
+function applyGrouped(grouped) {
   for (const grp of grouped) {
     if (grp.items.length >= 2) {
-      /* batch already forms a group — but also check if existing standalone matches */
       const existingMatch = findExistingStandaloneByStem(grp.baseName);
       let ph = null;
       if (existingMatch) {
@@ -682,12 +807,11 @@ async function handleFiles(fileList) {
         const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
         ph = insertPlaceholderBefore(oldTrack.el);
         removeTrackQuietly(oldTrack.id);
-        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR });
+        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, file: oldTrack.file, suffix: oldTag, nativeSR: oldTrack.nativeSR });
       }
       createDiffGroup(grp.baseName, grp.items);
       if (ph) placeCardAtPosition(ph);
     } else {
-      /* single new file — check if an existing standalone or group matches its stem */
       const newItem = grp.items[0];
       const { stem, tag } = extractTag(stripExt(newItem.name));
       const existingMatch = findExistingStandaloneByStem(stem);
@@ -698,22 +822,20 @@ async function handleFiles(fileList) {
         const ph = insertPlaceholderBefore(oldTrack.el);
         removeTrackQuietly(oldTrack.id);
         createDiffGroup(stem, [
-          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR },
+          { name: oldTrack.name, buffer: oldTrack.buffer, file: oldTrack.file, suffix: oldTag, nativeSR: oldTrack.nativeSR },
           { ...newItem, suffix: tag }
         ]);
         placeCardAtPosition(ph);
       } else {
-        /* check if an existing diff group matches */
         const existingGroup = findExistingGroupByStem(stem);
         if (existingGroup && tag) {
           addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
         } else {
-          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR);
+          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.file);
         }
       }
     }
   }
-  refreshUI();
 }
 
 /* Find a standalone track (not in any group) whose stem matches */
@@ -766,7 +888,7 @@ function addToDiffGroup(grp, newItem) {
     const t = tracks.find(tr => tr.id === id);
     if (!t) return null;
     const tag = extractTag(stripExt(t.name)).tag || t.name;
-    return { name: t.name, buffer: t.buffer, suffix: tag, nativeSR: t.nativeSR };
+    return { name: t.name, buffer: t.buffer, file: t.file, suffix: tag, nativeSR: t.nativeSR };
   }).filter(Boolean);
 
   const ph = insertPlaceholderBefore(grp.el);
@@ -877,6 +999,7 @@ const MIN_VIEW_SPAN = 0.05;
 const ZOOM_FACTOR = 1.25;
 
 function computeSpec(track, H) {
+  if (!track.buffer) return;
   const { buffer, nyquist } = track;
   const sr = buffer.sampleRate;
   const raw = buffer.numberOfChannels === 1 ? buffer.getChannelData(0) : mixDown(buffer);
@@ -913,6 +1036,7 @@ function computeSpec(track, H) {
 }
 
 function drawSpec(track) {
+  if (!track.buffer) return;
   const { canvas, specData, specFrames, specHop, specH } = track;
   if (!canvas || !specData || !specFrames) return;
   const ctx = canvas.getContext('2d');
@@ -1030,6 +1154,7 @@ function addWaveformLabels(el, h) {
 }
 
 function drawWaveform(track) {
+  if (!track.buffer) return;
   const canvas = track.waveformCanvas;
   if (!canvas) return;
   const refW = track.canvas ? track.canvas.width : 0;
@@ -1078,13 +1203,16 @@ function setWaveformVisible(visible) {
 /* ========================================================================
  *  TRACK HELPERS
  * ======================================================================== */
-function mkTrack(name, buffer, nativeSR) {
-  const id=nextId++, dur=buffer.duration;
-  const displaySR = nativeSR || buffer.sampleRate;  // for "24.0kHz" label
-  const renderSR  = buffer.sampleRate;               // actual decoded data rate
-  const ny = displaySR / 2;                           // native Nyquist (display + render limit)
+function mkTrack(name, buffer, nativeSR, file) {
+  const id = nextId++;
+  const loaded = !!buffer;
+  const dur       = loaded ? buffer.duration     : 0;
+  const displaySR = loaded ? (nativeSR || buffer.sampleRate) : 0;
+  const renderSR  = loaded ? buffer.sampleRate   : 0;
+  const ny        = displaySR / 2;
   return {
-    id, name, buffer, duration:dur, nyquist:ny, sr:displaySR, nativeSR:displaySR, renderSR,
+    id, name, buffer, file: file || null, loaded,
+    duration:dur, nyquist:ny, sr:displaySR, nativeSR:displaySR, renderSR,
     canvas:null, wrapper:null, ph:null, laneLabel:null, analysisStrip:null, analyzeBtn:null, rulerEl:null,
     playing:false, startTime:0, offset:0, source:null,
     groupId:null, el:null, analysisResults:null,
@@ -1109,7 +1237,7 @@ function buildSpecBody(track, h) {
     '<div class="waveform-labels" style="height:'+wfH+'px"></div>'+
     '<div class="waveform-wrapper" style="flex:1;position:relative;overflow:hidden;cursor:crosshair">'+
     '<canvas height="'+wfH+'"></canvas>'+
-    '<div style="position:absolute;top:0;width:2px;height:100%;background:#ff3333;pointer-events:none;z-index:10;left:0" class="wf-playhead"></div>'+
+    '<div style="position:absolute;top:0;left:0;width:2px;height:100%;background:#ff3333;pointer-events:none;z-index:10;will-change:transform" class="wf-playhead"></div>'+
     '</div>';
   el.appendChild(waveRow);
   track.waveformRow = waveRow;
@@ -1206,20 +1334,27 @@ function buildSpecBody(track, h) {
     updatePlayheads();
   });
 
-  track._pendingRender = () => {
-    const w = track.wrapper.clientWidth;
-    if (w > 0) {
-      track.canvas.width = w;
-      if (track.waveformCanvas) track.waveformCanvas.width = w;
-      setTimeout(() => {
-        renderSpec(track);
-        if (waveformVisible && track.waveformCanvas) drawWaveform(track);
+  if (track.loaded) {
+    /* Loaded track: schedule spectrogram render after DOM insertion */
+    track._pendingRender = () => {
+      const w = track.wrapper.clientWidth;
+      if (w > 0) {
+        track.canvas.width = w;
+        if (track.waveformCanvas) track.waveformCanvas.width = w;
+        setTimeout(() => {
+          renderSpec(track);
+          if (waveformVisible && track.waveformCanvas) drawWaveform(track);
+          if (loading.parentNode) loading.remove();
+        }, 0);
+      } else {
         if (loading.parentNode) loading.remove();
-      }, 0);
-    } else {
-      if (loading.parentNode) loading.remove();
-    }
-  };
+      }
+    };
+  } else {
+    /* Lazy track: show dark placeholder — IntersectionObserver will trigger decode */
+    loading.innerHTML = '<span style="color:#666;font-size:11px">Waiting to load…</span>';
+    track._pendingRender = null;
+  }
   return el;
 }
 
@@ -1259,6 +1394,7 @@ function updateRuler(track) {
  *  SELECT + SEEK
  * ======================================================================== */
 function selectAndSeek(track, time) {
+  if (!track.buffer) { setActive(track.id); return; } /* can't seek unloaded track */
   const was = track.playing;
   stopAllSources();
   setActive(track.id);
@@ -1279,9 +1415,11 @@ function getSiblings(t) {
 /* ========================================================================
  *  STANDALONE TRACK
  * ======================================================================== */
-function createStandalone(name, buffer, nativeSR) {
-  const t = mkTrack(name, buffer, nativeSR);
-  const chL = buffer.numberOfChannels===1?'Mono':buffer.numberOfChannels===2?'Stereo':buffer.numberOfChannels+'ch';
+function createStandalone(name, buffer, nativeSR, file) {
+  const t = mkTrack(name, buffer, nativeSR, file);
+  const infoText = t.loaded
+    ? (function(){ const b=buffer; const ch=b.numberOfChannels===1?'Mono':b.numberOfChannels===2?'Stereo':b.numberOfChannels+'ch'; return ch+' '+(t.sr/1000).toFixed(1)+'kHz | '+fmt(t.duration); })()
+    : '…';
   const card = document.createElement('div');
   card.className = 'card'; card.dataset.trackId = t.id;
   const hdr = document.createElement('div');
@@ -1289,7 +1427,7 @@ function createStandalone(name, buffer, nativeSR) {
   hdr.innerHTML =
     '<span class="card-title" title="'+esc(name)+'">'+esc(name)+'</span>'+
     '<button class="btn-analyze" title="Run audio classification">Analyze</button>'+
-    '<span class="card-info">'+chL+' '+(t.sr/1000).toFixed(1)+'kHz | '+fmt(t.duration)+'</span>'+
+    '<span class="card-info">'+esc(infoText)+'</span>'+
     '<button class="card-remove" title="Remove">&times;</button>';
   hdr.addEventListener('click', () => setActive(t.id));
   hdr.querySelector('.card-remove').addEventListener('click', e => { e.stopPropagation(); removeTrack(t.id); });
@@ -1302,8 +1440,14 @@ function createStandalone(name, buffer, nativeSR) {
   t.el = card;
   tracks.push(t);
   if (!activeTrackId) activeTrackId = t.id;
-  /* render after DOM insertion so wrapper has measured width */
-  requestAnimationFrame(() => { if (t._pendingRender) { t._pendingRender(); t._pendingRender = null; } });
+
+  if (t.loaded) {
+    /* render after DOM insertion so wrapper has measured width */
+    requestAnimationFrame(() => { if (t._pendingRender) { t._pendingRender(); t._pendingRender = null; } });
+  } else {
+    /* lazy: observe for viewport intersection */
+    lazyObserver.observe(card);
+  }
 }
 
 function removeTrack(id) {
@@ -1324,7 +1468,8 @@ function removeTrack(id) {
 function createDiffGroup(baseName, items) {
   const gid = nextGrpId++;
   const grpTracks = [];
-  const maxDur = Math.max(...items.map(i => i.buffer.duration));
+  const anyLoaded = items.some(i => !!i.buffer);
+  const maxDur = anyLoaded ? Math.max(...items.filter(i=>i.buffer).map(i => i.buffer.duration)) : 0;
   const card = document.createElement('div');
   card.className = 'card'; card.dataset.groupId = gid;
 
@@ -1335,7 +1480,7 @@ function createDiffGroup(baseName, items) {
     '<span class="card-title" title="'+esc(display)+'">'+esc(display)+'</span>'+
     '<span class="diff-badge">DIFF '+items.length+'</span>'+
     '<button class="btn-analyze-group" title="Analyze all tracks in this group">Analyze Group</button>'+
-    '<span class="card-info">'+fmt(maxDur)+'</span>'+
+    '<span class="card-info">'+(anyLoaded ? fmt(maxDur) : '…')+'</span>'+
     '<button class="card-remove" title="Remove group">&times;</button>';
   hdr.addEventListener('click', () => { if(grpTracks.length) setActive(grpTracks[0].id); });
   hdr.querySelector('.card-remove').addEventListener('click', e => { e.stopPropagation(); removeDiffGroup(gid); });
@@ -1346,7 +1491,7 @@ function createDiffGroup(baseName, items) {
   cols.className = 'diff-columns';
 
   items.forEach((item, idx) => {
-    const t = mkTrack(item.name, item.buffer, item.nativeSR);
+    const t = mkTrack(item.name, item.buffer, item.nativeSR, item.file);
     t.groupId = gid;
     const lane = document.createElement('div');
     lane.className = 'diff-lane';
@@ -1355,11 +1500,12 @@ function createDiffGroup(baseName, items) {
     lbl.className = 'diff-lane-label';
     const tagText = item.suffix ? item.suffix : ('Track '+(idx+1));
     const tagCls  = TAG_CSS[idx % TAG_CSS.length];
+    const srText  = t.loaded ? (t.sr/1000).toFixed(1)+'kHz' : '…';
     lbl.innerHTML =
       '<span class="diff-lane-tag '+tagCls+'">'+esc(tagText)+'</span>'+
       '<span class="diff-lane-name">'+esc(item.name)+'</span>'+
       '<button class="btn-analyze" title="Run audio classification">Analyze</button>'+
-      '<span class="card-info">'+(t.sr/1000).toFixed(1)+'kHz</span>'+
+      '<span class="card-info">'+esc(srText)+'</span>'+
       '<span class="diff-lane-playing"></span>'+
       '<button class="lane-remove" title="Remove this track">&times;</button>';
     lbl.addEventListener('click', () => { setActive(t.id); updateLaneHighlights(); });
@@ -1386,12 +1532,19 @@ function createDiffGroup(baseName, items) {
   tracksBox.appendChild(card);
   groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card });
   updateLaneHighlights();
-  /* render all lanes after DOM insertion so wrappers have measured width */
-  requestAnimationFrame(() => {
-    for (const t of grpTracks) {
-      if (t._pendingRender) { t._pendingRender(); t._pendingRender = null; }
-    }
-  });
+
+  if (grpTracks.some(t => t.loaded)) {
+    /* render loaded lanes after DOM insertion so wrappers have measured width */
+    requestAnimationFrame(() => {
+      for (const t of grpTracks) {
+        if (t._pendingRender) { t._pendingRender(); t._pendingRender = null; }
+      }
+    });
+  }
+  if (grpTracks.some(t => !t.loaded)) {
+    /* lazy: observe for viewport intersection */
+    lazyObserver.observe(card);
+  }
 }
 
 function removeDiffGroup(gid) {
@@ -1420,10 +1573,10 @@ function deleteTrackFromGroup(trackId) {
     const remainingId = g.trackIds.find(id => id !== t.id);
     const remaining = tracks.find(tr => tr.id === remainingId);
     if (remaining) {
-      const { name, buffer, nativeSR } = remaining;
+      const { name, buffer, nativeSR, file } = remaining;
       if (remaining.playing) stopSource(remaining);
       removeDiffGroupQuietly(g.id);
-      createStandalone(name, buffer, nativeSR);
+      createStandalone(name, buffer, nativeSR, file);
     } else { removeDiffGroupQuietly(g.id); }
   } else {
     const baseName = g.baseName;
@@ -1431,11 +1584,11 @@ function deleteTrackFromGroup(trackId) {
       const tr = tracks.find(x => x.id === id);
       if (!tr) return null;
       const tag = extractTag(stripExt(tr.name)).tag || tr.name;
-      return { name: tr.name, buffer: tr.buffer, suffix: tag, nativeSR: tr.nativeSR };
+      return { name: tr.name, buffer: tr.buffer, file: tr.file, suffix: tag, nativeSR: tr.nativeSR };
     }).filter(Boolean);
     removeDiffGroupQuietly(g.id);
     if (remainingItems.length >= 2) createDiffGroup(baseName, remainingItems);
-    else if (remainingItems.length === 1) { const it = remainingItems[0]; createStandalone(it.name, it.buffer, it.nativeSR); }
+    else if (remainingItems.length === 1) { const it = remainingItems[0]; createStandalone(it.name, it.buffer, it.nativeSR, it.file); }
   }
   const newCard = tracksBox.lastElementChild;
   if (newCard && newCard !== ph && ph.parentNode) tracksBox.insertBefore(newCard, ph);
@@ -1459,6 +1612,7 @@ function updateLaneHighlights() {
  *  Dynamically culls labels that would overlap vertically.
  * ======================================================================== */
 function addFreqLabels(el, ny) {
+  if (!ny || ny <= 0) return;  /* skip for unloaded tracks */
   const allTicks = [200,500,1000,2000,4000,8000,12000,16000,20000,24000];
   const h = parseInt(el.style.height) || 220;
   const MIN_GAP = 14; /* minimum px between label centers */
@@ -1568,6 +1722,7 @@ function highlightActive() {
  *  PLAYBACK
  * ======================================================================== */
 function playSource(t, from) {
+  if (!t.buffer) return;    /* not yet decoded */
   if (t.playing) stopSource(t);
   t.offset=from; t.startTime=audioCtx.currentTime;
   const src=audioCtx.createBufferSource();
@@ -1583,8 +1738,15 @@ function stopSource(t) {
   t.offset=Math.min(t.offset+audioCtx.currentTime-t.startTime,t.duration);
   try{t.source.stop();}catch(e){} t.source=null; t.playing=false;
 }
-function playActive() {
+async function playActive() {
   const t=getActive(); if(!t) return;
+  /* Auto-load lazy track before playing */
+  if (!t.buffer) {
+    await loadTrack(t);
+    if (!t.buffer) return;   /* decode failed */
+    updateCardInfo(t.el);
+    refreshUI();
+  }
   audioCtx.resume(); stopAllSources();
   if(t.offset>=t.duration-0.01) t.offset=0;
   playSource(t,t.offset); startAnim();
@@ -1606,7 +1768,7 @@ function togglePlay() {
 }
 
 /* Switch active lane within the current diff group (for A/B comparison) */
-function switchLane() {
+async function switchLane() {
   const t = getActive(); if (!t || t.groupId == null) return;
   const g = groups.find(g => g.id === t.groupId);
   if (!g || g.trackIds.length < 2) return;
@@ -1615,6 +1777,13 @@ function switchLane() {
   const nextIdx = (idx + 1) % g.trackIds.length;
   const nextTrack = tracks.find(tr => tr.id === g.trackIds[nextIdx]);
   if (!nextTrack) return;
+
+  /* Auto-load lazy track before switching */
+  if (!nextTrack.buffer) {
+    await loadTrack(nextTrack);
+    if (!nextTrack.buffer) return;
+    updateCardInfo(nextTrack.el);
+  }
 
   /* Capture current position */
   const pos = getPos(t);
@@ -1659,7 +1828,7 @@ function getPos(t) { return t.playing ? Math.min(t.offset+audioCtx.currentTime-t
 
 function updatePlayheads() {
   for(const t of tracks){
-    if(!t.canvas||!t.ph) continue;
+    if(!t.canvas||!t.ph||!t.loaded) continue;
     const pos=getPos(t);
     const span = t.viewEnd - t.viewStart;
     if (pos < t.viewStart || pos > t.viewEnd) {
@@ -1667,9 +1836,14 @@ function updatePlayheads() {
       if (t.waveformPh) t.waveformPh.style.display = 'none';
     } else {
       t.ph.style.display = '';
-      const pct = ((pos - t.viewStart) / span * 100) + '%';
-      t.ph.style.left = pct;
-      if (t.waveformPh) { t.waveformPh.style.display = ''; t.waveformPh.style.left = pct; }
+      const frac = (pos - t.viewStart) / span;
+      const px = frac * t.wrapper.clientWidth;
+      t.ph.style.transform = 'translateX(' + px + 'px)';
+      if (t.waveformPh) {
+        t.waveformPh.style.display = '';
+        const wfPx = t.waveformWrapper ? frac * t.waveformWrapper.clientWidth : px;
+        t.waveformPh.style.transform = 'translateX(' + wfPx + 'px)';
+      }
     }
   }
 }
@@ -1877,6 +2051,11 @@ async function runAnalysisGroup(allTracks, groupId) {
 /* Run analysis on a track */
 async function runAnalysis(track) {
   if (track.analysisResults) return; /* already analyzed */
+  if (!track.buffer) { /* lazy track — load first, then analyze */
+    await loadTrack(track);
+    if (!track.buffer) return; /* decode failed */
+    updateCardInfo(track.el);
+  }
   const btn = track.analyzeBtn;
   const strip = track.analysisStrip;
   if (!btn || !strip) return;
