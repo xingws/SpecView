@@ -879,12 +879,14 @@ function buildRuler(dur) {
  *  SELECT + SEEK
  * ======================================================================== */
 function selectAndSeek(track, time) {
+  const was = track.playing;
   stopAllSources();
   setActive(track.id);
   time = Math.max(0, Math.min(time, track.duration));
   const sibs = getSiblings(track);
   for (const s of sibs) s.offset = Math.max(0, Math.min(time, s.duration));
   updatePlayheads(); updateTimeDisplay();
+  if (was) { playSource(track, track.offset); startAnim(); }
 }
 
 function getSiblings(t) {
@@ -1109,6 +1111,29 @@ function refreshUI() {
 
 function setActive(id) { activeTrackId=id; highlightActive(); updateLaneHighlights(); updateTimeDisplay(); }
 
+function moveToNextCard() {
+  const cards = Array.from(tracksBox.children);
+  if (!cards.length) return;
+  const active = activeTrackId ? tracks.find(t=>t.id===activeTrackId) : tracks[0];
+  if (!active || !active.el) { if(tracks.length) setActive(tracks[0].id); return; }
+  const idx = cards.indexOf(active.el);
+  if (idx<0) return;
+  const nextCard = cards[(idx+1) % cards.length];
+  const firstTrack = tracks.find(t => t.el === nextCard);
+  if (firstTrack) { setActive(firstTrack.id); nextCard.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+}
+function moveToPrevCard() {
+  const cards = Array.from(tracksBox.children);
+  if (!cards.length) return;
+  const active = activeTrackId ? tracks.find(t=>t.id===activeTrackId) : tracks[0];
+  if (!active || !active.el) { if(tracks.length) setActive(tracks[0].id); return; }
+  const idx = cards.indexOf(active.el);
+  if (idx<0) return;
+  const prevCard = cards[(idx-1+cards.length) % cards.length];
+  const firstTrack = tracks.find(t => t.el === prevCard);
+  if (firstTrack) { setActive(firstTrack.id); prevCard.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+}
+
 function highlightActive() {
   document.querySelectorAll('.card.active').forEach(e => e.classList.remove('active'));
   if (!activeTrackId && tracks.length) activeTrackId = tracks[0].id;
@@ -1126,7 +1151,7 @@ function playSource(t, from) {
   src.buffer=t.buffer; src.connect(gainNode); src.start(0,from);
   t.source=src; t.playing=true;
   src.onended = () => {
-    if(t.playing){ t.offset=t.duration; t.playing=false; t.source=null;
+    if(t.source===src){ t.offset=t.duration; t.playing=false; t.source=null;
       updateTimeDisplay(); if(!tracks.some(tr=>tr.playing)) updatePlayBtn(false); }
   };
 }
@@ -1141,8 +1166,14 @@ function playActive() {
   if(t.offset>=t.duration-0.01) t.offset=0;
   playSource(t,t.offset); startAnim();
 }
-function stopAllSources() { tracks.forEach(stopSource); cancelAnimationFrame(rafId); rafId=null; }
+function stopAllSources() { tracks.forEach(stopSource); cancelAnimationFrame(rafId); rafId=null; updatePlayBtn(false); }
 function stopAll() { stopAllSources(); tracks.forEach(t=>{t.offset=0;}); updatePlayheads(); updateTimeDisplay(); updatePlayBtn(false); }
+function pauseAll() {
+  tracks.forEach(t => { if(t.playing) stopSource(t); });
+  if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
+  updatePlayBtn(false); updatePlayheads(); updateTimeDisplay();
+}
+document.addEventListener('visibilitychange', () => { if(document.hidden) pauseAll(); });
 
 function togglePlay() {
   if(!tracks.length) return;
@@ -1638,6 +1669,8 @@ btnClear.addEventListener('click',clearAll);
 
 document.addEventListener('keydown',e=>{
   if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+  if(!e.shiftKey && e.code==='ArrowUp'){e.preventDefault();moveToPrevCard();return;}
+  if(!e.shiftKey && e.code==='ArrowDown'){e.preventDefault();moveToNextCard();return;}
   if(e.code==='Space'&&e.shiftKey){e.preventDefault();switchLane();}
   else if(e.code==='Space'){e.preventDefault();togglePlay();}
   if(e.code==='Escape'){e.preventDefault();stopAll();}
