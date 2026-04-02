@@ -14,5 +14,12 @@
 - **File deduplication** — already loaded files are silently skipped
 - **Explorer integration** — right-click context menu "Open with SpecView" for multi-file selection
 - **Custom editor** — double-click audio files to open directly in SpecView
-- **Keyboard shortcuts** — Space (play/pause), Shift+Space (switch lane), Escape (stop), Arrow keys (seek)
+- **Time axis zoom** — Ctrl+wheel, Shift+drag box selection, toolbar +/–/Fit buttons, Shift+Arrow keyboard shortcuts
+  - STFT cached for instant zoom/scroll; group tracks zoom in sync
+- **Time-domain waveform display** — toggle via toolbar checkbox; amplitude labels (1.0, 0, -1.0); time-aligned with spectrogram; synced playhead
+- **Same-name different-directory grouping** — files with same name from different dirs auto-grouped with parent folder name as tag
+- **Auto-pause on visibility loss** — playback pauses when switching to another VS Code panel or tab
+- **Analysis strip visualization** — colored tags below spectrogram showing detected sound categories, time ranges, and confidence levels
+- **Multi-mirror model download** — ML model downloads from multiple mirrors (HuggingFace, HF Mirror) for reliability
+- **Keyboard shortcuts** — Space (play/pause), Shift+Space (switch lane), Escape (stop), Arrow keys (seek), Shift+Arrows (zoom)
 - **VS Code theme integration** — adapts to light and dark themes via CSS variables

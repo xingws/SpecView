@@ -1,9 +1,12 @@
 import type { Track, Group, DecodedItem } from './types';
-import { SPEC_H, SPEC_H_DIFF, renderSpec } from './spectrogram';
-import { TAG_CSS, stripExt, extractTag, groupByBaseName } from './grouping';
+import { SPEC_H, SPEC_H_DIFF, renderSpec, drawSpec, drawWaveform, getWaveformHeight } from './spectrogram';
+import { TAG_CSS, stripExt, extractTag, groupByBaseName, getParentFolderName } from './grouping';
 import { playSource, stopSource, getPos, resumeAudio } from './audio';
 import { runAnalysis, runAnalysisGroup } from './analysis';
 import { fmt, fmtShort, esc } from './util';
+
+const MIN_VIEW_SPAN = 0.05; // minimum visible span in seconds
+const ZOOM_FACTOR = 1.25;
 
 let tracks: Track[] = [];
 let groups: Group[] = [];
@@ -11,12 +14,16 @@ let nextId = 1;
 let nextGrpId = 1;
 let activeTrackId: number | null = null;
 let rafId: number | null = null;
+let waveformVisible = false;
 
 let tracksBox: HTMLElement;
 let dropZone: HTMLElement;
 let btnPlay: HTMLButtonElement;
 let btnStop: HTMLButtonElement;
 let btnAnalyzeAll: HTMLButtonElement;
+let btnZoomIn: HTMLButtonElement;
+let btnZoomOut: HTMLButtonElement;
+let btnZoomFit: HTMLButtonElement;
 let timeDisp: HTMLElement;
 let playIcon: HTMLElement;
 let playLabel: HTMLElement;
@@ -34,16 +41,19 @@ export function getSiblings(t: Track): Track[] {
   return g.trackIds.map(id => tracks.find(tr => tr.id === id)).filter(Boolean) as Track[];
 }
 
-function mkTrack(name: string, buffer: AudioBuffer, nativeSR: number): Track {
+function mkTrack(name: string, buffer: AudioBuffer, nativeSR: number, filePath?: string): Track {
   const id = nextId++;
   const dur = buffer.duration;
   const displaySR = nativeSR || buffer.sampleRate;
   const ny = displaySR / 2;
   return {
     id, name, buffer, duration: dur, nyquist: ny, sr: displaySR, nativeSR: displaySR, renderSR: buffer.sampleRate,
-    canvas: null, wrapper: null, ph: null, laneLabel: null, analysisStrip: null, analyzeBtn: null,
+    canvas: null, wrapper: null, ph: null, laneLabel: null, analysisStrip: null, analyzeBtn: null, rulerEl: null,
     playing: false, startTime: 0, offset: 0, source: null,
-    groupId: null, el: null, analysisResults: null,
+    groupId: null, el: null, analysisResults: null, filePath,
+    viewStart: 0, viewEnd: dur,
+    specData: null, specFrames: 0, specHop: 0, specH: 0, specMaxBin: 0, specGlobalPeak: -Infinity,
+    waveformCanvas: null, waveformWrapper: null, waveformRow: null, waveformPh: null,
   };
 }
 
@@ -92,10 +102,50 @@ function addFreqLabels(el: HTMLElement, ny: number): void {
   }
 }
 
+function addWaveformLabels(el: HTMLElement, h: number): void {
+  const labels = [
+    { text: '1.0', top: 5 },
+    { text: '0', top: h / 2 },
+    { text: '-1.0', top: h - 5 },
+  ];
+  for (const l of labels) {
+    const tick = document.createElement('span');
+    tick.className = 'waveform-tick';
+    tick.style.top = l.top + 'px';
+    el.appendChild(tick);
+    const lbl = document.createElement('span');
+    lbl.className = 'waveform-label';
+    lbl.style.top = l.top + 'px';
+    lbl.textContent = l.text;
+    el.appendChild(lbl);
+  }
+}
+
 function buildSpecBody(track: Track, h: number): HTMLElement {
   const el = document.createElement('div');
   el.className = 'track-body';
   el.style.flexDirection = 'column';
+
+  // Waveform row (height = 1/3 of spectrogram height)
+  const wfH = getWaveformHeight(h);
+  const waveRow = document.createElement('div');
+  waveRow.className = 'waveform-row';
+  waveRow.style.height = wfH + 'px';
+  waveRow.style.display = waveformVisible ? 'flex' : 'none';
+  waveRow.innerHTML =
+    '<div class="waveform-labels" style="height:' + wfH + 'px"></div>' +
+    '<div class="waveform-wrapper" style="flex:1;position:relative;overflow:hidden;cursor:crosshair">' +
+    '<canvas height="' + wfH + '"></canvas>' +
+    '<div class="waveform-playhead" style="position:absolute;top:0;width:2px;height:100%;background:#ff3333;pointer-events:none;z-index:10;left:0"></div>' +
+    '</div>';
+  el.appendChild(waveRow);
+  track.waveformRow = waveRow;
+  track.waveformWrapper = waveRow.querySelector('.waveform-wrapper');
+  track.waveformCanvas = waveRow.querySelector('canvas');
+  track.waveformPh = waveRow.querySelector('.waveform-playhead');
+  addWaveformLabels(waveRow.querySelector('.waveform-labels') as HTMLElement, wfH);
+
+  // Spectrogram row
   const specRow = document.createElement('div');
   specRow.style.cssText = 'display:flex;flex:1;min-height:0';
   specRow.innerHTML =
@@ -119,17 +169,101 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
   addFreqLabels(specRow.querySelector('.freq-labels') as HTMLElement, track.nyquist);
   const loading = specRow.querySelector('.loading-overlay') as HTMLElement;
 
-  track.wrapper!.addEventListener('click', e => {
+  // Click to seek (zoom-aware) — also on waveform wrapper
+  const seekHandler = (e: MouseEvent) => {
+    if ((track.wrapper as any)._wasDrag) { (track.wrapper as any)._wasDrag = false; return; }
     const rect = track.canvas!.getBoundingClientRect();
-    const cx = (e as MouseEvent).clientX - rect.left;
+    const cx = e.clientX - rect.left;
     const ratio = Math.max(0, Math.min(1, cx / rect.width));
-    selectAndSeek(track, ratio * track.duration);
+    const time = track.viewStart + ratio * (track.viewEnd - track.viewStart);
+    selectAndSeek(track, time);
+  };
+  track.wrapper!.addEventListener('click', seekHandler);
+  track.waveformWrapper!.addEventListener('click', seekHandler);
+
+  // Ctrl+wheel = zoom, plain wheel = horizontal scroll (when zoomed)
+  const wheelHandler = (e: WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = track.canvas!.getBoundingClientRect();
+      const mouseX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const factor = e.deltaY > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
+      applyZoom(track, mouseX, factor);
+    } else {
+      const span = track.viewEnd - track.viewStart;
+      if (span >= track.duration - 0.001) return; // not zoomed, let default scroll
+      e.preventDefault();
+      const shift = (e.deltaY / 500) * span;
+      applyPan(track, shift);
+    }
+  };
+  track.wrapper!.addEventListener('wheel', wheelHandler, { passive: false });
+  track.waveformWrapper!.addEventListener('wheel', wheelHandler, { passive: false });
+
+  // Shift+drag = selection zoom
+  let dragStartX: number | null = null;
+  let selBox: HTMLElement | null = null;
+
+  track.wrapper!.addEventListener('mousedown', e => {
+    if (e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      dragStartX = e.clientX;
+      selBox = document.createElement('div');
+      selBox.className = 'zoom-selection';
+      selBox.style.height = '100%';
+      track.wrapper!.appendChild(selBox);
+    }
   });
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (dragStartX === null || !selBox || !track.canvas) return;
+    const rect = track.canvas.getBoundingClientRect();
+    const left = Math.max(0, Math.min(dragStartX, e.clientX) - rect.left);
+    const right = Math.min(rect.width, Math.max(dragStartX, e.clientX) - rect.left);
+    selBox.style.left = left + 'px';
+    selBox.style.width = (right - left) + 'px';
+  };
+
+  const onMouseUp = (e: MouseEvent) => {
+    if (dragStartX === null) return;
+    const rect = track.canvas!.getBoundingClientRect();
+    const x1 = Math.max(0, (Math.min(dragStartX, e.clientX) - rect.left) / rect.width);
+    const x2 = Math.min(1, (Math.max(dragStartX, e.clientX) - rect.left) / rect.width);
+    if (selBox) selBox.remove();
+    selBox = null;
+    dragStartX = null;
+
+    if (x2 - x1 < 0.01) return; // too small
+    (track.wrapper as any)._wasDrag = true; // prevent click-to-seek
+
+    const span = track.viewEnd - track.viewStart;
+    const newStart = track.viewStart + x1 * span;
+    const newEnd = track.viewStart + x2 * span;
+    setTrackView(track, newStart, newEnd);
+    syncGroupZoom(track);
+    redrawTrack(track);
+    updateRuler(track);
+    // Redraw siblings in group
+    if (track.groupId != null) {
+      const sibs = getSiblings(track);
+      for (const s of sibs) {
+        if (s.id !== track.id) { redrawTrack(s); updateRuler(s); }
+      }
+    }
+    updatePlayheads();
+  };
+
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('mouseup', onMouseUp);
 
   track._pendingRender = () => {
     const w = track.wrapper!.clientWidth;
     if (w > 0) {
       track.canvas!.width = w;
+      if (track.waveformCanvas) {
+        track.waveformCanvas.width = w; // Use same width as spectrogram for time alignment
+      }
       setTimeout(() => {
         renderSpec(track);
         if (loading.parentNode) loading.remove();
@@ -142,31 +276,174 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
 }
 
 function niceStep(rawStep: number): number {
-  const nice = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+  const nice = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
   for (const n of nice) {
     if (n >= rawStep * 0.8) return n;
   }
   return rawStep;
 }
 
-function buildRuler(dur: number): HTMLElement {
+function buildRuler(track: Track): HTMLElement {
   const el = document.createElement('div');
   el.className = 'time-ruler';
-  const step = niceStep(dur / 10);
-  const n = Math.min(Math.ceil(dur / step), 20);
-  for (let i = 0; i <= n; i++) {
-    const t = i * step;
-    if (t > dur + 0.01) break;
-    const m = document.createElement('span');
-    m.className = 'time-mark';
-    m.textContent = fmtShort(t);
-    m.style.width = (step / dur * 100) + '%';
-    el.appendChild(m);
-  }
+  track.rulerEl = el;
+  populateRuler(el, track.viewStart, track.viewEnd);
   return el;
 }
 
+function populateRuler(el: HTMLElement, viewStart: number, viewEnd: number): void {
+  el.innerHTML = '';
+  const viewSpan = viewEnd - viewStart;
+  if (viewSpan <= 0) return;
+  const step = niceStep(viewSpan / 10);
+  // Start at the first nice-aligned tick >= viewStart
+  const firstTick = Math.ceil(viewStart / step) * step;
+  for (let t = firstTick; t <= viewEnd + 0.001; t += step) {
+    const pct = ((t - viewStart) / viewSpan) * 100;
+    if (pct < -1 || pct > 101) continue;
+    const m = document.createElement('span');
+    m.className = 'time-mark';
+    m.textContent = fmtShort(t);
+    m.style.position = 'absolute';
+    m.style.left = pct + '%';
+    el.appendChild(m);
+  }
+}
+
+function updateRuler(track: Track): void {
+  if (!track.rulerEl) return;
+  populateRuler(track.rulerEl, track.viewStart, track.viewEnd);
+  // Also update rulers of siblings in group
+  if (track.groupId != null) {
+    // For diff groups, there is one shared ruler. Find it.
+    // The ruler is attached to the card, not the individual track.
+    // All tracks in a group share the same viewStart/viewEnd after sync.
+  }
+}
+
+// ========== ZOOM FUNCTIONS ==========
+
+function setTrackView(track: Track, start: number, end: number): void {
+  const span = Math.max(MIN_VIEW_SPAN, end - start);
+  track.viewStart = Math.max(0, start);
+  track.viewEnd = Math.min(track.duration, track.viewStart + span);
+  // Adjust start if end was clamped
+  if (track.viewEnd - track.viewStart < span && track.viewStart > 0) {
+    track.viewStart = Math.max(0, track.viewEnd - span);
+  }
+}
+
+function applyZoom(track: Track, anchorRatio: number, factor: number): void {
+  const span = track.viewEnd - track.viewStart;
+  const anchorTime = track.viewStart + anchorRatio * span;
+  let newSpan = span * factor;
+  newSpan = Math.max(MIN_VIEW_SPAN, Math.min(track.duration, newSpan));
+  const newStart = anchorTime - anchorRatio * newSpan;
+  setTrackView(track, newStart, newStart + newSpan);
+  syncGroupZoom(track);
+  redrawTrack(track);
+  updateRuler(track);
+  // Also redraw siblings
+  if (track.groupId != null) {
+    const sibs = getSiblings(track);
+    for (const s of sibs) {
+      if (s.id !== track.id) { redrawTrack(s); updateRuler(s); }
+    }
+  }
+  updatePlayheads();
+}
+
+function applyPan(track: Track, shift: number): void {
+  const span = track.viewEnd - track.viewStart;
+  let newStart = track.viewStart + shift;
+  newStart = Math.max(0, Math.min(track.duration - span, newStart));
+  setTrackView(track, newStart, newStart + span);
+  syncGroupZoom(track);
+  redrawTrack(track);
+  updateRuler(track);
+  if (track.groupId != null) {
+    const sibs = getSiblings(track);
+    for (const s of sibs) {
+      if (s.id !== track.id) { redrawTrack(s); updateRuler(s); }
+    }
+  }
+  updatePlayheads();
+}
+
+function syncGroupZoom(track: Track): void {
+  if (track.groupId == null) return;
+  const sibs = getSiblings(track);
+  for (const s of sibs) {
+    if (s.id === track.id) continue;
+    s.viewStart = track.viewStart;
+    s.viewEnd = Math.min(track.viewEnd, s.duration);
+    if (s.viewEnd - s.viewStart < MIN_VIEW_SPAN) {
+      s.viewEnd = Math.min(s.duration, s.viewStart + MIN_VIEW_SPAN);
+    }
+  }
+}
+
+function redrawTrack(track: Track): void {
+  if (!track.canvas || !track.specData) return;
+  drawSpec(track);
+  if (waveformVisible && track.waveformCanvas) {
+    drawWaveform(track);
+  }
+}
+
+export function zoomIn(): void {
+  const t = getActive();
+  if (!t) return;
+  applyZoom(t, 0.5, 1 / ZOOM_FACTOR);
+}
+
+export function zoomOut(): void {
+  const t = getActive();
+  if (!t) return;
+  applyZoom(t, 0.5, ZOOM_FACTOR);
+}
+
+export function zoomFit(): void {
+  const t = getActive();
+  if (!t) return;
+  setTrackView(t, 0, t.duration);
+  syncGroupZoom(t);
+  redrawTrack(t);
+  updateRuler(t);
+  if (t.groupId != null) {
+    const sibs = getSiblings(t);
+    for (const s of sibs) {
+      if (s.id !== t.id) { redrawTrack(s); updateRuler(s); }
+    }
+  }
+  updatePlayheads();
+}
+
+// ========== WAVEFORM TOGGLE ==========
+
+export function setWaveformVisible(visible: boolean): void {
+  waveformVisible = visible;
+  for (const t of tracks) {
+    if (t.waveformRow) {
+      t.waveformRow.style.display = visible ? 'flex' : 'none';
+    }
+    if (visible && t.waveformCanvas) {
+      // Resize waveform canvas to match spectrogram width for time alignment
+      const w = t.wrapper!.clientWidth;
+      if (w > 0) t.waveformCanvas.width = w;
+      drawWaveform(t);
+    }
+  }
+}
+
+export function isWaveformVisible(): boolean {
+  return waveformVisible;
+}
+
+// ========== PLAYBACK + SEEK ==========
+
 function selectAndSeek(track: Track, time: number): void {
+  const was = track.playing;
   stopAllSources();
   setActive(track.id);
   time = Math.max(0, Math.min(time, track.duration));
@@ -174,6 +451,7 @@ function selectAndSeek(track: Track, time: number): void {
   for (const s of sibs) s.offset = Math.max(0, Math.min(time, s.duration));
   updatePlayheads();
   updateTimeDisplay();
+  if (was) { playSource(track, track.offset); startAnim(); }
 }
 
 function setActive(id: number): void {
@@ -204,8 +482,19 @@ export function updatePlayheads(): void {
   for (const t of tracks) {
     if (!t.canvas || !t.ph) continue;
     const pos = getPos(t);
-    const pct = (pos / t.duration) * 100;
-    t.ph.style.left = pct + '%';
+    const span = t.viewEnd - t.viewStart;
+    if (pos < t.viewStart || pos > t.viewEnd) {
+      t.ph.style.display = 'none';
+      if (t.waveformPh) t.waveformPh.style.display = 'none';
+    } else {
+      t.ph.style.display = '';
+      const pct = ((pos - t.viewStart) / span) * 100;
+      t.ph.style.left = pct + '%';
+      if (t.waveformPh) {
+        t.waveformPh.style.display = '';
+        t.waveformPh.style.left = pct + '%';
+      }
+    }
   }
 }
 
@@ -222,6 +511,7 @@ export function updatePlayBtn(p: boolean): void {
 export function stopAllSources(): void {
   tracks.forEach(stopSource);
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  updatePlayBtn(false);
 }
 
 export function stopAll(): void {
@@ -230,6 +520,16 @@ export function stopAll(): void {
   updatePlayheads();
   updateTimeDisplay();
   updatePlayBtn(false);
+}
+
+export function pauseAll(): void {
+  for (const t of tracks) {
+    if (t.playing) stopSource(t);
+  }
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  updatePlayBtn(false);
+  updatePlayheads();
+  updateTimeDisplay();
 }
 
 export function playActive(): void {
@@ -310,6 +610,8 @@ function startAnim(): void {
   })();
 }
 
+// ========== TRACK MANAGEMENT ==========
+
 function removeTrackQuietly(id: number): void {
   const i = tracks.findIndex(t => t.id === id);
   if (i < 0) return;
@@ -354,8 +656,8 @@ function findExistingGroupByStem(stem: string): Group | null {
   return null;
 }
 
-function createStandalone(name: string, buffer: AudioBuffer, nativeSR: number): void {
-  const t = mkTrack(name, buffer, nativeSR);
+function createStandalone(name: string, buffer: AudioBuffer, nativeSR: number, filePath?: string): void {
+  const t = mkTrack(name, buffer, nativeSR, filePath);
   const chL = buffer.numberOfChannels === 1 ? 'Mono' : buffer.numberOfChannels === 2 ? 'Stereo' : buffer.numberOfChannels + 'ch';
   const card = document.createElement('div');
   card.className = 'card';
@@ -373,7 +675,7 @@ function createStandalone(name: string, buffer: AudioBuffer, nativeSR: number): 
   t.analyzeBtn = hdr.querySelector('.btn-analyze');
   card.appendChild(hdr);
   card.appendChild(buildSpecBody(t, SPEC_H));
-  card.appendChild(buildRuler(t.duration));
+  card.appendChild(buildRuler(t));
   tracksBox.appendChild(card);
   t.el = card;
   tracks.push(t);
@@ -407,7 +709,7 @@ function createDiffGroup(baseName: string, items: DecodedItem[]): void {
   cols.className = 'diff-columns';
 
   items.forEach((item, idx) => {
-    const t = mkTrack(item.name, item.buffer, item.nativeSR);
+    const t = mkTrack(item.name, item.buffer, item.nativeSR, item.filePath);
     t.groupId = gid;
     const lane = document.createElement('div');
     lane.className = 'diff-lane';
@@ -438,7 +740,13 @@ function createDiffGroup(baseName: string, items: DecodedItem[]): void {
   });
 
   card.appendChild(cols);
-  card.appendChild(buildRuler(maxDur));
+  // Use first track for the shared ruler
+  const rulerTrack = grpTracks[0];
+  const rulerEl = buildRuler(rulerTrack);
+  card.appendChild(rulerEl);
+  // Share the ruler element reference across all group tracks
+  for (const t of grpTracks) t.rulerEl = rulerEl;
+
   tracksBox.appendChild(card);
   groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card });
   updateLaneHighlights();
@@ -453,8 +761,9 @@ function addToDiffGroup(grp: Group, newItem: DecodedItem): void {
   const existingItems = grp.trackIds.map(id => {
     const t = tracks.find(tr => tr.id === id);
     if (!t) return null;
-    const tag = extractTag(stripExt(t.name)).tag || t.name;
-    return { name: t.name, buffer: t.buffer, suffix: tag, nativeSR: t.nativeSR } as DecodedItem;
+    const tag = extractTag(stripExt(t.name)).tag;
+    const suffix = tag || (t.filePath ? getParentFolderName(t.filePath) : t.name);
+    return { name: t.name, buffer: t.buffer, suffix, nativeSR: t.nativeSR, filePath: t.filePath } as DecodedItem;
   }).filter(Boolean) as DecodedItem[];
 
   removeDiffGroupQuietly(grp.id);
@@ -510,30 +819,21 @@ export function refreshUI(): void {
     has ? '+ Click to add more audio files' : 'Click to add audio files';
   btnPlay.disabled = !has;
   btnStop.disabled = !has;
+  btnZoomIn.disabled = !has;
+  btnZoomOut.disabled = !has;
+  btnZoomFit.disabled = !has;
   btnAnalyzeAll.disabled = !has;
   highlightActive();
   updateLaneHighlights();
   updateTimeDisplay();
 }
 
-/**
- * Compute display names for a group of items from different directories.
- * If all files are in the same directory, names stay as basenames.
- * If files are in different directories, names become relative paths
- * from their common parent directory.
- */
 function computeDisplayNames(items: DecodedItem[]): void {
   const paths = items.map(i => i.filePath).filter(Boolean) as string[];
   if (paths.length < 2) return;
-
-  // Normalize separators to /
   const normalized = paths.map(p => p.replace(/\\/g, '/'));
   const dirs = normalized.map(p => p.substring(0, p.lastIndexOf('/') + 1));
-
-  // All files in same directory → keep basenames
   if (dirs.every(d => d === dirs[0])) return;
-
-  // Compute common directory prefix
   let common = dirs[0];
   for (let i = 1; i < dirs.length; i++) {
     while (common && !dirs[i].startsWith(common)) {
@@ -541,8 +841,6 @@ function computeDisplayNames(items: DecodedItem[]): void {
       common = idx >= 0 ? common.substring(0, idx + 1) : '';
     }
   }
-
-  // Replace name with relative path from common prefix
   for (const item of items) {
     if (item.filePath) {
       const rel = item.filePath.replace(/\\/g, '/').substring(common.length);
@@ -561,7 +859,24 @@ export function handleFiles(items: DecodedItem[]): void {
         const oldTrack = existingMatch;
         const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
         removeTrackQuietly(oldTrack.id);
-        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR });
+        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath });
+      }
+      // For same-name same-tag files from different directories, set suffix to parent folder
+      const hasFilePath = grp.items.some(i => i.filePath);
+      if (hasFilePath) {
+        const nameCounts = new Map<string, number>();
+        for (const item of grp.items) {
+          const n = item.name.toLowerCase();
+          nameCounts.set(n, (nameCounts.get(n) || 0) + 1);
+        }
+        const hasDupes = Array.from(nameCounts.values()).some(v => v > 1);
+        if (hasDupes) {
+          for (const item of grp.items) {
+            if (!item.suffix && item.filePath) {
+              item.suffix = getParentFolderName(item.filePath);
+            }
+          }
+        }
       }
       computeDisplayNames(grp.items);
       createDiffGroup(grp.baseName, grp.items);
@@ -571,21 +886,36 @@ export function handleFiles(items: DecodedItem[]): void {
       const existingMatch = findExistingStandaloneByStem(stem);
 
       if (existingMatch && tag) {
+        // Known tag: merge with existing standalone
         const oldTrack = existingMatch;
         const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
         removeTrackQuietly(oldTrack.id);
         const mergeItems: DecodedItem[] = [
-          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR },
+          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath },
           { ...newItem, suffix: tag },
+        ];
+        computeDisplayNames(mergeItems);
+        createDiffGroup(stem, mergeItems);
+      } else if (existingMatch && newItem.filePath && existingMatch.filePath !== newItem.filePath) {
+        // No known tag, but same stem and different directories — same-name different-dir merge
+        const oldTrack = existingMatch;
+        removeTrackQuietly(oldTrack.id);
+        const mergeItems: DecodedItem[] = [
+          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: getParentFolderName(oldTrack.filePath || ''), nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath },
+          { ...newItem, suffix: getParentFolderName(newItem.filePath) },
         ];
         computeDisplayNames(mergeItems);
         createDiffGroup(stem, mergeItems);
       } else {
         const existingGroup = findExistingGroupByStem(stem);
         if (existingGroup && tag) {
+          // Known tag — add to existing group
           addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
+        } else if (existingGroup) {
+          // No known tag — add with parent folder name as suffix
+          addToDiffGroup(existingGroup, { ...newItem, suffix: newItem.filePath ? getParentFolderName(newItem.filePath) : undefined });
         } else {
-          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR);
+          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.filePath);
         }
       }
     }
@@ -599,6 +929,9 @@ export function initUI(): void {
   btnPlay = document.getElementById('btn-play') as HTMLButtonElement;
   btnStop = document.getElementById('btn-stop') as HTMLButtonElement;
   btnAnalyzeAll = document.getElementById('btn-analyze-all') as HTMLButtonElement;
+  btnZoomIn = document.getElementById('btn-zoom-in') as HTMLButtonElement;
+  btnZoomOut = document.getElementById('btn-zoom-out') as HTMLButtonElement;
+  btnZoomFit = document.getElementById('btn-zoom-fit') as HTMLButtonElement;
   timeDisp = document.getElementById('time-display')!;
   playIcon = document.getElementById('play-icon')!;
   playLabel = document.getElementById('play-label')!;

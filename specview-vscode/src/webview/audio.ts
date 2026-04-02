@@ -30,7 +30,9 @@ export function playSource(t: Track, from: number): void {
   t.source = src;
   t.playing = true;
   src.onended = () => {
-    if (t.playing) {
+    // Only clear state if this source is still the active one
+    // (prevents stale onended from a previous source clearing the new source's state)
+    if (t.source === src) {
       t.offset = t.duration;
       t.playing = false;
       t.source = null;

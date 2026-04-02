@@ -17,9 +17,33 @@ Supported formats: **WAV, MP3, OGG, FLAC, M4A, AAC, WebM, WMA, AIFF, Opus**.
 ### Audio Playback
 
 - **Play / Pause / Stop** controls in the toolbar
-- **Click on spectrogram** to seek to any position
+- **Click on spectrogram** to seek to any position (preserves playback state)
 - **Volume control** slider
 - Real-time playhead tracking with time display
+- **Auto-pause**: Playback automatically pauses when you switch to another VS Code panel or tab
+
+### Time-Domain Waveform Display
+
+Toggle the waveform view via the **Waveform** checkbox in the toolbar to display the time-domain amplitude envelope above each spectrogram.
+
+- Amplitude labels (-1.0, 0, 1.0) are displayed on the left Y-axis
+- The waveform canvas is time-aligned with the spectrogram; click, zoom, and seek operations work on both simultaneously
+- Shows amplitude envelope as min/max vertical bars per pixel column
+- Synced playhead with the spectrogram view
+- Ctrl+wheel and Shift+drag work on both the waveform and spectrogram
+
+### Time Axis Zoom
+
+Zoom into any region of the spectrogram for detailed inspection:
+
+- **Ctrl + Mouse Wheel**: Zoom in/out centered on mouse position
+- **Mouse Wheel** (when zoomed): Horizontal scroll to pan the visible region
+- **Shift + Drag**: Select a time region to zoom into (box selection)
+- **Toolbar + / – / Fit**: Zoom in, zoom out, or reset to full view
+- **Keyboard**: `Shift+Up` (zoom in), `Shift+Down` (zoom out), `Shift+Left` (fit all)
+- **Group sync**: All tracks in a diff group zoom and scroll together
+- Playhead hides automatically when outside the visible region
+- STFT is computed once and cached; zoom/scroll operations are instant
 
 ### Auto-Grouping for A/B Comparison
 
@@ -45,6 +69,7 @@ The following tags trigger automatic grouping when used as a suffix (e.g., `file
 | `song.wav` + `song_pred.wav` | Yes | stem=`song`, tags=(empty)+`pred` |
 | `pred-song.wav` + `orig-song.wav` | Yes | prefix mode, stem=`song` |
 | `file1_ground_truth.wav` + `file1.wav` | Yes | longest match: `ground_truth` |
+| `/exp1/file1.wav` + `/exp2/file1.wav` | Yes | same-name different-dir, tags=`exp1`+`exp2` |
 | `my_song.wav` + `my_voice.wav` | No | `song` and `voice` not in tag list |
 | `file1_xxx.wav` | No | `xxx` not in tag list |
 
@@ -53,6 +78,7 @@ The following tags trigger automatic grouping when used as a suffix (e.g., `file
 - Tags are matched **case-insensitively**, longest match first
 - Both **suffix** (`stem_tag`) and **prefix** (`tag_stem`) patterns are supported
 - A group forms when **2+ files** share the same stem with **2+ distinct tags** (empty tag counts as one)
+- Same-name files from different directories are auto-grouped; the tag displays as the parent folder name
 - Duplicate files (same path) are automatically skipped
 
 ### ML Audio Classification
@@ -67,13 +93,15 @@ Three levels of analysis:
 | **Analyze Group** | Group card header | All tracks in the group |
 | **Analyze** | Individual track / lane | Single track |
 
-The model is downloaded once on first use (~20MB) and cached for subsequent analyses.
+The model is downloaded once on first use (~20MB) and cached for subsequent analyses. Detection results are displayed as colored tags below each spectrogram, showing detected sound categories, time ranges, and confidence levels.
 
 ### Cross-Directory Support
 
 When comparing files from different directories, display names automatically show the relative path from their common parent directory for clear identification.
 
 Example: files from `/project/exp1/file1.wav` and `/project/exp2/file1_pred.wav` display as `exp1/file1.wav` and `exp2/file1_pred.wav`.
+
+Files with the same name from different directories are automatically grouped, with the parent folder name displayed as the tag.
 
 ## Usage
 
@@ -93,8 +121,10 @@ Example: files from `/project/exp1/file1.wav` and `/project/exp2/file1_pred.wav`
 | `Space` | Play / Pause |
 | `Shift + Space` | Switch lane in diff group (A/B comparison) |
 | `Escape` | Stop playback and reset position |
-| `←` | Seek backward 2 seconds |
-| `→` | Seek forward 2 seconds |
+| `←` / `→` | Seek backward / forward 2 seconds |
+| `Shift + ↑` | Zoom in (time axis) |
+| `Shift + ↓` | Zoom out (time axis) |
+| `Shift + ←` | Reset zoom (fit all) |
 
 ## Requirements
 

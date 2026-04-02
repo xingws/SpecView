@@ -207,6 +207,24 @@ body {
   position: relative; flex: 1; overflow: hidden; cursor: crosshair;
 }
 .spec-wrapper canvas { display: block; width: 100%; }
+.waveform-row { flex-shrink: 0; border-bottom: 1px solid #333; }
+.waveform-wrapper { position: relative; overflow: hidden; cursor: crosshair; }
+.waveform-wrapper canvas { display: block; width: 100%; }
+.waveform-labels {
+  width: 44px; position: relative; flex-shrink: 0;
+  background: #1a1a1a; border-right: 1px solid #333;
+  overflow: hidden;
+}
+.waveform-label {
+  position: absolute; right: 4px; font-size: 8px; color: #999;
+  font-family: var(--vscode-editor-font-family, 'Consolas', monospace);
+  transform: translateY(-50%); white-space: nowrap; pointer-events: none;
+  line-height: 1;
+}
+.waveform-tick {
+  position: absolute; right: 0; width: 5px; height: 1px;
+  background: #444; pointer-events: none;
+}
 .playhead {
   position: absolute; top: 0; width: 2px; height: 100%;
   background: var(--playhead); pointer-events: none; z-index: 10;
@@ -214,13 +232,17 @@ body {
 }
 
 .time-ruler {
-  display: flex; padding: 2px 0 2px 44px;
+  position: relative; height: 16px; padding: 2px 0 2px 44px;
   background: var(--bg-header); border-top: 1px solid var(--border-light); overflow: hidden;
 }
 .time-mark {
-  font-size: 9px; color: var(--text-dim);
+  position: absolute; font-size: 9px; color: var(--text-dim);
   font-family: var(--vscode-editor-font-family, 'Consolas', monospace);
-  flex-shrink: 0; text-align: left; padding-left: 2px;
+  white-space: nowrap; transform: translateX(-50%);
+}
+.zoom-selection {
+  position: absolute; top: 0; background: rgba(59,130,246,0.25);
+  border: 1px solid rgba(59,130,246,0.6); pointer-events: none; z-index: 15;
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }

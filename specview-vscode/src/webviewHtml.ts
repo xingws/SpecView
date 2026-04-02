@@ -37,7 +37,15 @@ export function getWebviewHtml(
     <input type="range" class="vol-slider" id="vol-slider" min="0" max="100" value="80">
   </div>
   <div class="sep"></div>
+  <button class="btn" id="btn-zoom-in" disabled title="Zoom In (Shift+Up)">+</button>
+  <button class="btn" id="btn-zoom-out" disabled title="Zoom Out (Shift+Down)">&#8211;</button>
+  <button class="btn" id="btn-zoom-fit" disabled title="Fit All (Shift+Left)">Fit</button>
+  <div class="sep"></div>
   <button class="btn" id="btn-analyze-all" disabled>Analyze All</button>
+  <div class="sep"></div>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap">
+    <input type="checkbox" id="chk-waveform"> Waveform
+  </label>
   <div class="sep"></div>
   <button class="btn" id="btn-clear">Clear All</button>
 </div>

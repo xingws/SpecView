@@ -82,13 +82,12 @@ function mixDown(buf: AudioBuffer): Float32Array {
   return out;
 }
 
-export function renderSpec(track: Track): void {
-  const { buffer, canvas, nyquist } = track;
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const W = canvas.width, H = canvas.height;
-  if (W === 0 || H === 0) return;
+/**
+ * Compute full STFT for a track and cache the results.
+ * Call this once when the track is first loaded.
+ */
+export function computeSpec(track: Track, H: number): void {
+  const { buffer, nyquist } = track;
   const sr = buffer.sampleRate;
   const raw = buffer.numberOfChannels === 1 ? buffer.getChannelData(0) : mixDown(buffer);
   const nS = raw.length;
@@ -100,18 +99,8 @@ export function renderSpec(track: Track): void {
   const binHz = sr / FFT_SIZE;
   const maxBin = Math.min(nBins - 1, Math.ceil(nyquist / binHz));
 
-  const defaultHop = FFT_SIZE / HOP_DIV;
-  const defaultFrames = Math.max(1, Math.floor((nS - FFT_SIZE) / defaultHop) + 1);
-  let hop: number;
-  let maxFrames: number;
-  if (defaultFrames < W && nS > FFT_SIZE) {
-    hop = Math.max(1, Math.floor((nS - FFT_SIZE) / (W - 1)));
-    maxFrames = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
-  } else {
-    hop = defaultHop;
-    maxFrames = defaultFrames;
-  }
-  const nF = Math.min(W, maxFrames);
+  const hop = FFT_SIZE / HOP_DIV;
+  const nF = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
 
   const re = new Float64Array(FFT_SIZE);
   const im = new Float64Array(FFT_SIZE);
@@ -144,8 +133,47 @@ export function renderSpec(track: Track): void {
     }
   }
 
-  let peak = -Infinity;
-  for (let i = 0; i < colDb.length; i++) if (colDb[i] > peak) peak = colDb[i];
+  // Cache results on the track
+  let globalPeak = -Infinity;
+  for (let i = 0; i < colDb.length; i++) {
+    if (colDb[i] > globalPeak) globalPeak = colDb[i];
+  }
+  track.specData = colDb;
+  track.specFrames = nF;
+  track.specHop = hop;
+  track.specH = H;
+  track.specMaxBin = maxBin;
+  track.specGlobalPeak = globalPeak;
+}
+
+/**
+ * Draw the visible portion [viewStart, viewEnd] of the cached STFT data to the canvas.
+ * Fast operation — no FFT, just pixel mapping from cached data.
+ */
+export function drawSpec(track: Track): void {
+  const { canvas, specData, specFrames, specHop, specH } = track;
+  if (!canvas || !specData || !specFrames) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const W = canvas.width, H = canvas.height;
+  if (W === 0 || H === 0) return;
+
+  const sr = track.buffer.sampleRate;
+  const nS = track.buffer.length;
+  const nF = specFrames;
+  const hop = specHop;
+
+  // Map viewStart/viewEnd to frame indices
+  const startSample = Math.max(0, Math.floor(track.viewStart * sr));
+  const endSample = Math.min(nS, Math.ceil(track.viewEnd * sr));
+  const startFrame = Math.max(0, Math.floor((startSample - FFT_SIZE / 2) / hop));
+  const endFrame = Math.min(nF - 1, Math.ceil((endSample - FFT_SIZE / 2) / hop));
+  const visibleFrames = Math.max(1, endFrame - startFrame + 1);
+
+  // Use global peak for consistent normalization regardless of zoom level
+  // This prevents silent regions from suddenly appearing bright when zoomed in
+  let peak = track.specGlobalPeak;
+  if (peak < -120) peak = -50; // fallback for entirely silent files
   const floor = peak - DB_RANGE;
   const invRange = 1 / DB_RANGE;
 
@@ -155,10 +183,11 @@ export function renderSpec(track: Track): void {
   const isLE = new Uint8Array(new Uint32Array([0x0A0B0C0D]).buffer)[0] === 0x0D;
 
   for (let x = 0; x < W; x++) {
-    const col = Math.min(Math.round(x * nF / W), nF - 1);
+    // Map pixel x to a frame in the visible range
+    const col = Math.min(startFrame + Math.round(x * visibleFrames / W), endFrame);
     const base = col * H;
     for (let y = 0; y < H; y++) {
-      const db = colDb[base + y];
+      const db = specData[base + y];
       let norm = (db - floor) * invRange;
       if (norm < 0) norm = 0; else if (norm > 1) norm = 1;
       const li = (norm * 255 + 0.5) | 0;
@@ -172,4 +201,102 @@ export function renderSpec(track: Track): void {
     }
   }
   ctx.putImageData(img, 0, 0);
+}
+
+/**
+ * Full render: compute STFT (if not cached) then draw visible region.
+ * Backward-compatible entry point.
+ */
+export function renderSpec(track: Track): void {
+  const H = track.canvas ? track.canvas.height : SPEC_H;
+  if (!track.specData) {
+    computeSpec(track, H);
+  }
+  drawSpec(track);
+}
+
+/**
+ * Draw time-domain waveform for the visible region [viewStart, viewEnd].
+ * Shows amplitude envelope as min/max vertical bars per pixel column.
+ */
+export function drawWaveform(track: Track): void {
+  const canvas = track.waveformCanvas;
+  if (!canvas) return;
+
+  // Sync canvas width with spectrogram canvas for time alignment
+  const refW = track.canvas ? track.canvas.width : 0;
+  if (refW > 0 && canvas.width !== refW) {
+    canvas.width = refW;
+  }
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const W = canvas.width, H = canvas.height;
+  if (W === 0 || H === 0) return;
+
+  // Get audio data (mix down to mono)
+  const buf = track.buffer;
+  const raw = buf.numberOfChannels === 1 ? buf.getChannelData(0) : (() => {
+    const out = new Float32Array(buf.getChannelData(0).length);
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < ch.length; i++) out[i] += ch[i];
+    }
+    for (let i = 0; i < out.length; i++) out[i] /= buf.numberOfChannels;
+    return out;
+  })();
+
+  const sr = buf.sampleRate;
+  const nS = raw.length;
+  const startSample = Math.max(0, Math.floor(track.viewStart * sr));
+  const endSample = Math.min(nS, Math.ceil(track.viewEnd * sr));
+  const visibleSamples = endSample - startSample;
+  if (visibleSamples <= 0) return;
+
+  const samplesPerPixel = visibleSamples / W;
+  const mid = H / 2;
+
+  // Clear and draw background
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Draw zero line
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, mid);
+  ctx.lineTo(W, mid);
+  ctx.stroke();
+
+  // Draw waveform envelope (min/max per pixel column)
+  ctx.strokeStyle = '#4a9eff';
+  ctx.lineWidth = 1;
+
+  for (let x = 0; x < W; x++) {
+    const sStart = Math.floor(startSample + x * samplesPerPixel);
+    const sEnd = Math.min(nS, Math.ceil(startSample + (x + 1) * samplesPerPixel));
+
+    let min = 1, max = -1;
+    for (let s = sStart; s < sEnd; s++) {
+      const v = raw[s];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+
+    // Map amplitude [-1, 1] to pixel Y
+    const yMin = mid - max * mid;
+    const yMax = mid - min * mid;
+    ctx.beginPath();
+    ctx.moveTo(x, yMin);
+    ctx.lineTo(x, yMax);
+    ctx.stroke();
+  }
+}
+
+/**
+ * Compute waveform height for a given spec height.
+ */
+export function getWaveformHeight(specH: number): number {
+  return Math.round(specH / 3);
 }

@@ -57,8 +57,20 @@ export function extractTag(noExt: string): TagResult {
 }
 
 /**
- * Group items by their stem. Only forms a diff group when there are
- * at least 2 items with at least 2 distinct tags (including empty tag).
+ * Extract the parent folder name from a file path.
+ * e.g., "/project/exp1/file1.wav" → "exp1"
+ */
+export function getParentFolderName(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  const dir = normalized.substring(0, normalized.lastIndexOf('/'));
+  const folderName = dir.substring(dir.lastIndexOf('/') + 1);
+  return folderName || filePath;
+}
+
+/**
+ * Group items by their stem. Forms a diff group when:
+ * - 2+ items with 2+ distinct tags, OR
+ * - 2+ items with same stem and same tag but different parent directories (same-name different-dir)
  */
 export function groupByBaseName(items: DecodedItem[]): GroupResult[] {
   const m = new Map<string, { baseName: string; items: DecodedItem[] }>();
@@ -71,7 +83,20 @@ export function groupByBaseName(items: DecodedItem[]): GroupResult[] {
   const out: GroupResult[] = [];
   for (const [, val] of m) {
     const uniq = new Set(val.items.map(i => (i.suffix || '').toLowerCase()));
-    if (val.items.length >= 2 && uniq.size >= 2) {
+    // Check for same-name files from different directories
+    const sameNameDiffDir = val.items.length >= 2 && uniq.size === 1 &&
+      val.items.some((a, i) => val.items.some((b, j) =>
+        i < j && a.filePath && b.filePath && a.name === b.name && a.filePath !== b.filePath
+      ));
+    if (val.items.length >= 2 && (uniq.size >= 2 || sameNameDiffDir)) {
+      // For same-name files from different directories, set suffix to parent folder name
+      if (sameNameDiffDir) {
+        for (const item of val.items) {
+          if (item.filePath && !item.suffix) {
+            item.suffix = getParentFolderName(item.filePath);
+          }
+        }
+      }
       out.push(val);
       continue;
     }

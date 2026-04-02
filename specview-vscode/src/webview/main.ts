@@ -2,6 +2,7 @@ import { initAudio, setVolume } from './audio';
 import {
   initUI, handleFiles, togglePlay, stopAll, clearAll, seek,
   getActive, switchLane, getTracks,
+  zoomIn, zoomOut, zoomFit, setWaveformVisible, pauseAll,
 } from './ui';
 import { getPos } from './audio';
 import { runAnalysisAll } from './analysis';
@@ -101,8 +102,15 @@ const btnAnalyzeAll = document.getElementById('btn-analyze-all') as HTMLButtonEl
 const btnClear = document.getElementById('btn-clear') as HTMLButtonElement;
 const volSlider = document.getElementById('vol-slider') as HTMLInputElement;
 
+const btnZoomIn = document.getElementById('btn-zoom-in') as HTMLButtonElement;
+const btnZoomOut = document.getElementById('btn-zoom-out') as HTMLButtonElement;
+const btnZoomFit = document.getElementById('btn-zoom-fit') as HTMLButtonElement;
+
 btnPlay.addEventListener('click', togglePlay);
 btnStop.addEventListener('click', stopAll);
+btnZoomIn.addEventListener('click', zoomIn);
+btnZoomOut.addEventListener('click', zoomOut);
+btnZoomFit.addEventListener('click', zoomFit);
 btnAnalyzeAll.addEventListener('click', () => { runAnalysisAll(getTracks()); });
 btnClear.addEventListener('click', () => {
   clearAll();
@@ -110,12 +118,29 @@ btnClear.addEventListener('click', () => {
 });
 volSlider.addEventListener('input', () => { setVolume(volSlider.valueAsNumber / 100); });
 
+// Waveform toggle
+const chkWaveform = document.getElementById('chk-waveform') as HTMLInputElement;
+chkWaveform.addEventListener('change', () => { setWaveformVisible(chkWaveform.checked); });
+
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) return;
+
+  // Zoom shortcuts: Shift+Up / Shift+Down / Shift+Left
+  if (e.shiftKey && e.code === 'ArrowUp') { e.preventDefault(); zoomIn(); return; }
+  if (e.shiftKey && e.code === 'ArrowDown') { e.preventDefault(); zoomOut(); return; }
+  if (e.shiftKey && e.code === 'ArrowLeft') { e.preventDefault(); zoomFit(); return; }
+
   if (e.code === 'Space' && e.shiftKey) { e.preventDefault(); switchLane(); }
   else if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   if (e.code === 'Escape') { e.preventDefault(); stopAll(); }
-  if (e.code === 'ArrowLeft') { e.preventDefault(); const t = getActive(); if (t) seek(getPos(t) - 2); }
-  if (e.code === 'ArrowRight') { e.preventDefault(); const t = getActive(); if (t) seek(getPos(t) + 2); }
+  if (e.code === 'ArrowLeft' && !e.shiftKey) { e.preventDefault(); const t = getActive(); if (t) seek(getPos(t) - 2); }
+  if (e.code === 'ArrowRight' && !e.shiftKey) { e.preventDefault(); const t = getActive(); if (t) seek(getPos(t) + 2); }
+});
+
+// Pause playback when webview loses visibility (user switches to another panel/tab)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    pauseAll();
+  }
 });
