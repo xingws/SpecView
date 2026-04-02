@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SpecView - Spectrogram Player</title>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/js-untar@2.0.0/build/dist/untar.js"></script>
 <style>
 :root {
   --bg: #f0f0f0;
@@ -339,13 +340,13 @@ body {
 
 <div id="drop-zone" class="empty">
   <div class="dz-icon">&#127925;</div>
-  <div class="dz-text">Drop audio files here or click to browse</div>
-  <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &mdash; matching suffixes auto-grouped for diff</div>
+  <div class="dz-text">Drop audio files or .tar/.tar.gz archives here, or click to browse</div>
+  <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &amp; .tar/.tar.gz archives &mdash; matching suffixes auto-grouped for diff</div>
 </div>
-<input type="file" id="file-input" multiple accept="audio/*" hidden>
+<input type="file" id="file-input" multiple accept="audio/*,.tar,.tar.gz,.tgz,application/x-tar,application/gzip" hidden>
 
 <div id="tracks-container"></div>
-<div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop audio files anywhere</span></div>
+<div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop audio files or archives anywhere</span></div>
 
 <script>
 (function() {
@@ -431,6 +432,139 @@ let tracks = [], groups = [], nextId = 1, nextGrpId = 1;
 let activeTrackId = null, rafId = null;
 
 volSlider.addEventListener('input', () => { gainNode.gain.value = volSlider.value / 100; });
+
+/* ========================================================================
+ *  TAR / TAR.GZ ARCHIVE SUPPORT
+ *  Decompresses .tar.gz/.tgz via DecompressionStream, then extracts
+ *  audio files using js-untar. Results are fed into the normal pipeline.
+ * ======================================================================== */
+const TAR_EXT  = /\.(tar|tar\.gz|tgz)$/i;
+const AUDIO_RE = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
+
+/* Decompress a gzipped ArrayBuffer using the native DecompressionStream API */
+async function decompressGzip(arrayBuffer) {
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('DecompressionStream API not available. Please use a modern browser (Chrome 80+, Firefox 113+, Safari 16.4+).');
+  }
+  const ds = new DecompressionStream('gzip');
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+  writer.write(new Uint8Array(arrayBuffer));
+  writer.close();
+  const chunks = [];
+  let totalLen = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLen += value.length;
+  }
+  const out = new Uint8Array(totalLen);
+  let off = 0;
+  for (const ch of chunks) { out.set(ch, off); off += ch.length; }
+  return out.buffer;
+}
+
+/* Extract audio files from a .tar or .tar.gz/.tgz archive.
+   Returns an array of File-like objects { name, arrayBuffer(), type } */
+async function extractAudioFromTar(arrayBuffer, fileName) {
+  let tarBuffer = arrayBuffer;
+
+  /* If gzipped, decompress first */
+  if (/\.(tar\.gz|tgz)$/i.test(fileName)) {
+    tarBuffer = await decompressGzip(arrayBuffer);
+  }
+
+  /* Use js-untar to parse the tar */
+  if (typeof window.untar !== 'function') {
+    throw new Error('js-untar library not loaded.');
+  }
+
+  const entries = await window.untar(tarBuffer);
+  const audioFiles = [];
+
+  for (const entry of entries) {
+    /* Skip directories and empty files */
+    if (!entry.name || entry.size === 0 || entry.type === '5') continue;
+
+    /* Use basename only (strip directory path) */
+    const baseName = entry.name.split('/').pop();
+    if (!baseName || !AUDIO_RE.test(baseName)) continue;
+
+    /* Build a File-like object that the existing pipeline can consume */
+    const blob = entry.blob || new Blob([entry.buffer]);
+    const file = new File([blob], baseName, {
+      type: blob.type || guessAudioMime(baseName)
+    });
+    audioFiles.push(file);
+  }
+
+  return audioFiles;
+}
+
+/* Guess MIME type from extension for audio files */
+function guessAudioMime(name) {
+  const ext = (name.match(/\.([^.]+)$/) || [])[1];
+  if (!ext) return 'audio/unknown';
+  const map = {
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+    flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac',
+    webm: 'audio/webm', wma: 'audio/x-ms-wma', aiff: 'audio/aiff',
+    opus: 'audio/opus'
+  };
+  return map[ext.toLowerCase()] || 'audio/unknown';
+}
+
+/* Process dropped items: separate tar archives from regular audio files,
+   extract audio from archives, then feed everything into handleFiles. */
+async function handleDroppedItems(fileList) {
+  const regularFiles = [];
+  const tarFiles = [];
+
+  for (const f of fileList) {
+    if (TAR_EXT.test(f.name)) {
+      tarFiles.push(f);
+    } else {
+      regularFiles.push(f);
+    }
+  }
+
+  if (tarFiles.length === 0) {
+    /* No archives — pass through directly */
+    return handleFiles(fileList);
+  }
+
+  /* Show extraction progress */
+  const overlay = document.getElementById('drop-overlay');
+  overlay.classList.add('visible');
+  overlay.querySelector('.drop-overlay-text').textContent = 'Extracting audio from archive...';
+
+  try {
+    for (const tf of tarFiles) {
+      try {
+        overlay.querySelector('.drop-overlay-text').textContent =
+          'Extracting: ' + tf.name + '...';
+        const arrBuf = await tf.arrayBuffer();
+        const extracted = await extractAudioFromTar(arrBuf, tf.name);
+        console.log('Extracted', extracted.length, 'audio files from', tf.name);
+        for (const f of extracted) regularFiles.push(f);
+      } catch (e) {
+        console.error('Failed to extract tar:', tf.name, e);
+        /* Show brief error, then continue */
+        overlay.querySelector('.drop-overlay-text').textContent =
+          'Error extracting ' + tf.name + ': ' + (e.message || e);
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+  } finally {
+    overlay.classList.remove('visible');
+    overlay.querySelector('.drop-overlay-text').textContent = 'Drop audio files or archives anywhere';
+  }
+
+  if (regularFiles.length > 0) {
+    await handleFiles(regularFiles);
+  }
+}
 
 /* ========================================================================
  *  FILE HANDLING
@@ -1102,7 +1236,7 @@ function refreshUI() {
   const has = tracks.length>0;
   dropZone.className = has ? 'compact' : 'empty';
   dropZone.querySelector('.dz-text').textContent =
-    has ? '+ Add more audio files' : 'Drop audio files here or click to browse';
+    has ? '+ Add more audio files or archives' : 'Drop audio files or .tar/.tar.gz archives here, or click to browse';
   btnPlay.disabled = !has; btnStop.disabled = !has;
   highlightActive(); updateLaneHighlights(); updateTimeDisplay();
 }
@@ -1622,7 +1756,7 @@ function renderAnalysisStrip(track) {
  *  EVENTS
  * ======================================================================== */
 dropZone.addEventListener('click',()=>fileInput.click());
-fileInput.addEventListener('change',e=>{handleFiles(e.target.files);e.target.value='';});
+fileInput.addEventListener('change',e=>{handleDroppedItems(e.target.files);e.target.value='';});
 
 /* Full-page drag-and-drop */
 const dropOverlay = document.getElementById('drop-overlay');
@@ -1630,7 +1764,7 @@ let dragCounter = 0;
 document.addEventListener('dragenter',e=>{e.preventDefault();dragCounter++;dropOverlay.classList.add('visible');});
 document.addEventListener('dragleave',e=>{e.preventDefault();dragCounter--;if(dragCounter<=0){dragCounter=0;dropOverlay.classList.remove('visible');}});
 document.addEventListener('dragover',e=>{e.preventDefault();});
-document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;dropOverlay.classList.remove('visible');if(e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);});
+document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;dropOverlay.classList.remove('visible');if(e.dataTransfer.files.length) handleDroppedItems(e.dataTransfer.files);});
 
 btnPlay.addEventListener('click',togglePlay);
 btnStop.addEventListener('click',stopAll);
