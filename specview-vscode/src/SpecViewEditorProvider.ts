@@ -79,7 +79,7 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
   private static panel: vscode.WebviewPanel | null = null;
   private static lastOpenDir: vscode.Uri | undefined;
   private static loadedFiles = new Set<string>();
-  private static tarCache = new Map<string, TarCache>();  // key: "archiveName" → cached tar index
+  private static tarCache = new Map<string, TarCache>();  // key: fsPath → cached tar index
   private static modelDownloading = false;
   private static modelDownloadCallbacks: { resolve: (uri: vscode.Uri) => void; reject: (e: Error) => void }[] = [];
   private static readonly LAZY_THRESHOLD = 10; // files above this count trigger lazy loading
@@ -187,9 +187,9 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
         const uriStr: string = msg.uri;
         // Check if this is a tar-internal key (format: "tar:archiveName/fileName")
         if (uriStr.startsWith('tar:')) {
-          const slashIdx = uriStr.indexOf('/', 4);
-          const archiveName = uriStr.substring(4, slashIdx);
-          const fileName = uriStr.substring(slashIdx + 1);
+          const sepIdx = uriStr.indexOf('\n');
+          const archiveName = uriStr.substring(4, sepIdx);
+          const fileName = uriStr.substring(sepIdx + 1);
           const cached = this.tarCache.get(archiveName);
           if (cached) {
             const entry = cached.entries.find(e => e.name === fileName);
@@ -378,7 +378,7 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
           // Small archive: extract all at once
           const files = entries.map(e => ({
             name: displayName(e.name),
-            filePath: 'tar:' + cacheKey + '/' + e.name,
+            filePath: 'tar:' + cacheKey + '\n' + e.name,
             base64: uint8ToBase64(new Uint8Array(buffer.subarray(e.offset, e.offset + e.size))),
           }));
           webviewPanel.webview.postMessage({ type: 'archiveFiles', files });
@@ -388,14 +388,14 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
           const remaining = entries.slice(this.LAZY_THRESHOLD);
           const files = firstBatch.map(e => ({
             name: displayName(e.name),
-            filePath: 'tar:' + cacheKey + '/' + e.name,
+            filePath: 'tar:' + cacheKey + '\n' + e.name,
             base64: uint8ToBase64(new Uint8Array(buffer.subarray(e.offset, e.offset + e.size))),
           }));
           webviewPanel.webview.postMessage({ type: 'archiveFiles', files });
           if (remaining.length > 0) {
             const tarUris = remaining.map(e => ({
               name: displayName(e.name),
-              uri: 'tar:' + cacheKey + '/' + e.name,
+              uri: 'tar:' + cacheKey + '\n' + e.name,
             }));
             webviewPanel.webview.postMessage({ type: 'fileURIs', files: tarUris });
           }
