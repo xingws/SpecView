@@ -32,7 +32,7 @@ Supported formats: **WAV, MP3, OGG, FLAC, M4A, AAC, WebM, WMA, AIFF, Opus** — 
 Try the live demo at https://richermans.github.io/SpecView/ or https://xingws.github.io/SpecView/, or run locally:
 
 1. Open `index.html` in a browser
-2. Drag & drop audio files or click to browse
+2. Drag & drop audio files, folders, or archives — or click to browse
 3. Click spectrogram to seek; Ctrl+wheel to zoom
 4. Use toolbar for playback, zoom, waveform, and analysis controls
 
