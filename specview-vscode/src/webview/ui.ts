@@ -28,25 +28,43 @@ let timeDisp: HTMLElement;
 let playIcon: HTMLElement;
 let playLabel: HTMLElement;
 
-// Lazy loading observer — decodes audio when card scrolls into view
+// Lazy loading observer with concurrency limit
+const MAX_CONCURRENT_LOADS = 3;
+let activeLoads = 0;
+const loadQueue: Track[] = [];
+
+function enqueueLoad(t: Track): void {
+  if (t.loaded || t._loading) return;
+  if (!loadQueue.some(q => q.id === t.id)) loadQueue.push(t);
+  drainLoadQueue();
+}
+
+function drainLoadQueue(): void {
+  while (activeLoads < MAX_CONCURRENT_LOADS && loadQueue.length > 0) {
+    const t = loadQueue.shift()!;
+    if (t.loaded || t._loading || !isTrackAlive(t)) continue;
+    activeLoads++;
+    loadTrack(t).finally(() => { activeLoads--; drainLoadQueue(); });
+  }
+}
+
 const lazyObserver = new IntersectionObserver(
   (entries) => {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
       const card = entry.target as HTMLElement;
       lazyObserver.unobserve(card);
-      // Find all tracks associated with this card and load them
       const trackId = card.dataset.trackId;
       const groupId = card.dataset.groupId;
       if (trackId) {
         const t = tracks.find(tr => tr.id === Number(trackId));
-        if (t && !t.loaded) loadTrack(t);
+        if (t && !t.loaded) enqueueLoad(t);
       } else if (groupId) {
         const g = groups.find(gr => gr.id === Number(groupId));
         if (g) {
           for (const tid of g.trackIds) {
             const t = tracks.find(tr => tr.id === tid);
-            if (t && !t.loaded) loadTrack(t);
+            if (t && !t.loaded) enqueueLoad(t);
           }
         }
       }
@@ -68,6 +86,10 @@ export function getSiblings(t: Track): Track[] {
   return g.trackIds.map(id => tracks.find(tr => tr.id === id)).filter(Boolean) as Track[];
 }
 
+function isTrackAlive(t: Track): boolean {
+  return tracks.some(tr => tr.id === t.id);
+}
+
 async function loadTrack(t: Track): Promise<void> {
   if (t.loaded || t._loading) return;
   t._loading = true;
@@ -84,13 +106,17 @@ async function loadTrack(t: Track): Promise<void> {
       const requestFileData = (window as any).__requestFileData as (uri: string) => Promise<ArrayBuffer>;
       if (!requestFileData) { t._loading = false; return; }
       const raw = await requestFileData(t.lazyUri);
+      // Check if track was removed during async gap
+      if (!isTrackAlive(t)) return;
       const nativeSR = parseNativeSampleRate(raw) || null;
       const decoded = await (window as any).__audioCtx.decodeAudioData(raw.slice(0));
+      // Check again after second async gap
+      if (!isTrackAlive(t)) return;
       t.buffer = decoded;
       t.nativeSR = nativeSR || decoded.sampleRate;
     }
 
-    if (!t.buffer) { t._loading = false; return; }
+    if (!t.buffer || !isTrackAlive(t)) return;
 
     t.loaded = true;
     t.duration = t.buffer.duration;
@@ -315,6 +341,9 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
       selBox.className = 'zoom-selection';
       selBox.style.height = '100%';
       track.wrapper!.appendChild(selBox);
+      // Register document listeners only during active drag
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
     }
   });
 
@@ -328,6 +357,10 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
   };
 
   const onMouseUp = (e: MouseEvent) => {
+    // Always clean up listeners on mouseup to prevent leaks
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+
     if (dragStartX === null) return;
     const rect = track.canvas!.getBoundingClientRect();
     const x1 = Math.max(0, (Math.min(dragStartX, e.clientX) - rect.left) / rect.width);
@@ -355,9 +388,6 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
     }
     updatePlayheads();
   };
-
-  document.addEventListener('mousemove', onMouseMove);
-  document.addEventListener('mouseup', onMouseUp);
 
   if (track.loaded) {
     track._pendingRender = () => {
@@ -839,10 +869,10 @@ function placeCardAtPosition(placeholder: HTMLElement): void {
   placeholder.remove();
 }
 
-function createStandalone(name: string, buffer: AudioBuffer, nativeSR: number, filePath?: string): void {
-  const t = mkTrack(name, buffer, nativeSR, filePath);
-  const infoText = t.loaded
-    ? (function(){ const b = buffer; const ch = b.numberOfChannels === 1 ? 'Mono' : b.numberOfChannels === 2 ? 'Stereo' : b.numberOfChannels + 'ch'; return ch + ' ' + (t.sr / 1000).toFixed(1) + 'kHz | ' + fmt(t.duration); })()
+function createStandalone(name: string, buffer: AudioBuffer | null, nativeSR: number, filePath?: string, lazyUri?: string): void {
+  const t = mkTrack(name, buffer, nativeSR, filePath, lazyUri);
+  const infoText = t.loaded && buffer
+    ? (function(){ const ch = buffer.numberOfChannels === 1 ? 'Mono' : buffer.numberOfChannels === 2 ? 'Stereo' : buffer.numberOfChannels + 'ch'; return ch + ' ' + (t.sr / 1000).toFixed(1) + 'kHz | ' + fmt(t.duration); })()
     : '…';
   const card = document.createElement('div');
   card.className = 'card';
@@ -1038,10 +1068,10 @@ function deleteTrackFromGroup(trackId: number): void {
     const remainingId = g.trackIds.find(id => id !== t.id);
     const remaining = tracks.find(tr => tr.id === remainingId);
     if (remaining) {
-      const { name, buffer, nativeSR, filePath } = remaining;
+      const { name, buffer, nativeSR, filePath, lazyUri } = remaining;
       if (remaining.playing) stopSource(remaining);
       removeDiffGroupQuietly(g.id);
-      createStandalone(name, buffer, nativeSR, filePath);
+      createStandalone(name, buffer, nativeSR, filePath, lazyUri);
     } else {
       removeDiffGroupQuietly(g.id);
     }

@@ -122,24 +122,32 @@ async function decodeAndAddFile(name: string, filePath: string | undefined, arra
   }
 }
 
+const DECODE_CONCURRENCY = 3;
+
 async function decodeAndAddBatch(files: { name: string; filePath?: string; base64: string }[]): Promise<void> {
-  const promises = files.map(async (f) => {
-    try {
-      const raw = base64ToArrayBuffer(f.base64);
-      const nativeSR = parseNativeSampleRate(raw) || null;
-      const decoded = await audioCtx.decodeAudioData(raw.slice(0));
-      return {
-        name: f.name,
-        filePath: f.filePath,
-        buffer: decoded,
-        nativeSR: nativeSR || decoded.sampleRate,
-      } as DecodedItem;
-    } catch (e) {
-      console.error('Decode error:', f.name, e);
-      return null;
-    }
-  });
-  const items = (await Promise.all(promises)).filter(Boolean) as DecodedItem[];
+  const items: DecodedItem[] = [];
+  // Process in chunks to limit concurrent memory usage
+  for (let i = 0; i < files.length; i += DECODE_CONCURRENCY) {
+    const chunk = files.slice(i, i + DECODE_CONCURRENCY);
+    const promises = chunk.map(async (f) => {
+      try {
+        const raw = base64ToArrayBuffer(f.base64);
+        const nativeSR = parseNativeSampleRate(raw) || null;
+        const decoded = await audioCtx.decodeAudioData(raw.slice(0));
+        return {
+          name: f.name,
+          filePath: f.filePath,
+          buffer: decoded,
+          nativeSR: nativeSR || decoded.sampleRate,
+        } as DecodedItem;
+      } catch (e) {
+        console.error('Decode error:', f.name, e);
+        return null;
+      }
+    });
+    const results = (await Promise.all(promises)).filter(Boolean) as DecodedItem[];
+    items.push(...results);
+  }
   if (items.length > 0) handleFiles(items);
 }
 
@@ -264,12 +272,25 @@ document.addEventListener('drop', async (e) => {
     }
   }
 
+  // Decode and add dropped audio files directly in webview
+  if (audioFiles.length > 0) {
+    for (const af of audioFiles) {
+      try {
+        const raw = await af.arrayBuffer();
+        await decodeAndAddFile(af.name, undefined, raw);
+      } catch (err) {
+        console.error('Failed to decode dropped audio:', af.name, err);
+      }
+    }
+  }
+
   // Send archives to extension host for extraction
   for (const af of archiveFiles) {
     try {
       if (overlay) {
         overlay.classList.add('visible');
-        overlay.querySelector('.drop-overlay-text')!.textContent = 'Extracting: ' + af.name + '...';
+        const textEl = overlay.querySelector('.drop-overlay-text');
+        if (textEl) textEl.textContent = 'Extracting: ' + af.name + '...';
       }
       const base64 = await readFileAsBase64(af);
       vscode.postMessage({ type: 'archiveData', name: af.name, base64 });
