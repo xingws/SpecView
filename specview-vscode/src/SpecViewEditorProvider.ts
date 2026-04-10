@@ -71,19 +71,6 @@ async function parseTarIndex(archiveData: Uint8Array, archiveName: string): Prom
   return { buffer: tarBuffer, entries };
 }
 
-/**
- * Legacy: extract all audio files at once (used for drag-drop archiveData).
- */
-async function extractAudioFromTarArchive(
-  archiveData: Uint8Array,
-  archiveName: string
-): Promise<{ name: string; data: Uint8Array }[]> {
-  const { buffer, entries } = await parseTarIndex(archiveData, archiveName);
-  return entries.map(e => ({
-    name: e.name.split('/').pop() || e.name,
-    data: new Uint8Array(buffer.subarray(e.offset, e.offset + e.size)),
-  }));
-}
 
 const CED_MODEL_FILE = 'ced-tiny.onnx';
 const CED_MODEL_PATH = 'mispeech/ced-tiny/resolve/main/model.onnx';
@@ -190,28 +177,6 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
         });
         if (picked) {
           await this.sendFiles(webviewPanel, picked, context);
-        }
-      } else if (msg.type === 'archiveData') {
-        try {
-          const raw = Buffer.from(msg.base64, 'base64');
-          const extracted = await extractAudioFromTarArchive(new Uint8Array(raw), msg.name);
-          if (extracted.length > 0) {
-            const files = extracted.map(f => ({
-              name: f.name,
-              base64: uint8ToBase64(f.data),
-            }));
-            webviewPanel.webview.postMessage({ type: 'archiveFiles', files });
-          } else {
-            webviewPanel.webview.postMessage({
-              type: 'error',
-              message: `No audio files found in ${msg.name}`,
-            });
-          }
-        } catch (e) {
-          webviewPanel.webview.postMessage({
-            type: 'error',
-            message: `Failed to extract ${msg.name}: ${(e as Error).message}`,
-          });
         }
       } else if (msg.type === 'clearLoaded') {
         this.loadedFiles.clear();

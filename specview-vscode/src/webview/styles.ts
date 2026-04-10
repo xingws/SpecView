@@ -257,18 +257,6 @@ body {
 ::-webkit-scrollbar-thumb { background: #c0c0c0; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #aaa; }
 
-.drop-overlay {
-  position: fixed; inset: 0; z-index: 999;
-  background: rgba(59,130,246,0.12);
-  display: none; align-items: center; justify-content: center;
-  border: 3px dashed var(--accent); border-radius: 12px; margin: 12px;
-}
-.drop-overlay.visible { display: flex; }
-.drop-overlay-text {
-  font-size: 18px; color: var(--accent); background: var(--bg-card);
-  padding: 12px 24px; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-  font-weight: 600;
-}
 
 .loading-overlay {
   position: absolute; inset: 0; background: rgba(0,0,0,0.8);

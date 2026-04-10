@@ -1118,7 +1118,7 @@ export function refreshUI(): void {
   const has = tracks.length > 0;
   dropZone.className = has ? 'compact' : 'empty';
   dropZone.querySelector('.dz-text')!.textContent =
-    has ? '+ Click to add more audio files or archives' : 'Drop audio files or .tar/.tar.gz archives here, or click to browse';
+    has ? '+ Click to add more audio files or archives' : 'Click to add audio files or archives';
   btnPlay.disabled = !has;
   btnStop.disabled = !has;
   btnZoomIn.disabled = !has;

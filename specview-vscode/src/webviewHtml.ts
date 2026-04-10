@@ -52,12 +52,11 @@ export function getWebviewHtml(
 
 <div id="drop-zone" class="empty">
   <div class="dz-icon">&#127925;</div>
-  <div class="dz-text">Drop audio files or .tar/.tar.gz archives here, or click to browse</div>
+  <div class="dz-text">Click to add audio files or archives</div>
   <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &amp; .tar/.tar.gz archives &mdash; or right-click folders in Explorer</div>
 </div>
 
 <div id="tracks-container"></div>
-<div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop audio files or archives anywhere</span></div>
 
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
