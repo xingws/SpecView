@@ -393,12 +393,12 @@ body {
 <div id="drop-zone" class="empty">
   <div class="dz-icon">&#127925;</div>
   <div class="dz-text">Drop audio files or .tar/.tar.gz archives here, or click to browse</div>
-  <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &amp; .tar/.tar.gz archives &mdash; matching suffixes auto-grouped for diff</div>
+  <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &amp; .tar/.tar.gz archives &mdash; drop folders or files, matching suffixes auto-grouped for diff</div>
 </div>
 <input type="file" id="file-input" multiple accept="audio/*,.tar,.tar.gz,.tgz,application/x-tar,application/gzip" hidden>
 
 <div id="tracks-container"></div>
-<div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop audio files or archives anywhere</span></div>
+<div class="drop-overlay" id="drop-overlay"><span class="drop-overlay-text">Drop audio files, folders, or archives anywhere</span></div>
 
 <script>
 (function() {
@@ -695,6 +695,71 @@ function guessAudioMime(name) {
   return map[ext.toLowerCase()] || 'audio/unknown';
 }
 
+/* Read all file entries from a dropped directory (top-level only, non-recursive) */
+async function readDirectoryEntry(dirEntry) {
+  return new Promise((resolve, reject) => {
+    const reader = dirEntry.createReader();
+    const allEntries = [];
+    function readBatch() {
+      reader.readEntries(entries => {
+        if (entries.length === 0) { resolve(allEntries); return; }
+        allEntries.push(...entries);
+        readBatch(); /* readEntries returns max 100 entries per call */
+      }, reject);
+    }
+    readBatch();
+  });
+}
+
+function fileEntryToFile(fileEntry) {
+  return new Promise((resolve, reject) => { fileEntry.file(resolve, reject); });
+}
+
+/* Process dropped items: handle both files and folders via webkitGetAsEntry */
+async function processDroppedEntries(dataTransfer) {
+  const items = dataTransfer.items;
+  if (!items || !items.length) {
+    /* Fallback for browsers without items API */
+    if (dataTransfer.files && dataTransfer.files.length) {
+      await handleDroppedItems(dataTransfer.files);
+    }
+    return;
+  }
+
+  /* Snapshot entries synchronously — webkitGetAsEntry() must be called
+     within the drop event handler before any await */
+  const entries = [];
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+    entries.push({ entry, item });
+  }
+
+  const allFiles = [];
+  for (const { entry, item } of entries) {
+    if (!entry) {
+      const f = item.getAsFile ? item.getAsFile() : null;
+      if (f) allFiles.push(f);
+      continue;
+    }
+    if (entry.isDirectory) {
+      try {
+        const dirEntries = await readDirectoryEntry(entry);
+        dirEntries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+        for (const child of dirEntries) {
+          if (child.isFile) {
+            try { allFiles.push(await fileEntryToFile(child)); }
+            catch (e) { console.error('Failed to read:', child.name, e); }
+          }
+        }
+      } catch (e) { console.error('Failed to read directory:', entry.name, e); }
+    } else {
+      try { allFiles.push(await fileEntryToFile(entry)); }
+      catch (e) { console.error('Failed to read:', entry.name, e); }
+    }
+  }
+  if (allFiles.length > 0) await handleDroppedItems(allFiles);
+}
+
 /* Process dropped items: separate tar archives from regular audio files,
    extract audio from archives, then feed everything into handleFiles.
    handleFiles() manages its own batch-loading progress overlay. */
@@ -739,7 +804,7 @@ async function handleDroppedItems(fileList) {
     /* Hide the extraction overlay — handleFiles creates placeholder cards
        instantly (lazy) or decodes eagerly for small sets. */
     overlay.classList.remove('visible');
-    overlayText.textContent = 'Drop audio files or archives anywhere';
+    overlayText.textContent = 'Drop audio files, folders, or archives anywhere';
   }
 
   if (regularFiles.length > 0) {
@@ -2355,7 +2420,7 @@ let dragCounter = 0;
 document.addEventListener('dragenter',e=>{e.preventDefault();dragCounter++;dropOverlay.classList.add('visible');});
 document.addEventListener('dragleave',e=>{e.preventDefault();dragCounter--;if(dragCounter<=0){dragCounter=0;dropOverlay.classList.remove('visible');}});
 document.addEventListener('dragover',e=>{e.preventDefault();});
-document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;dropOverlay.classList.remove('visible');if(e.dataTransfer.files.length) handleDroppedItems(e.dataTransfer.files);});
+document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;dropOverlay.classList.remove('visible');processDroppedEntries(e.dataTransfer);});
 
 btnPlay.addEventListener('click',togglePlay);
 btnStop.addEventListener('click',stopAll);
