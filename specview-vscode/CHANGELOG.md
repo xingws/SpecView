@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.2
+
+### New Features
+
+- **Tar/Tar.gz archive support** — open `.tar`/`.tar.gz`/`.tgz` archives via file dialog or right-click
+- **Folder right-click** — "Open folder with SpecView" loads all audio files (top-level, natural sort)
+- **Lazy loading** — large file sets (>10) decode on scroll via IntersectionObserver
+- **Batched card creation** — 100 cards per batch with "Load More" button
+- **Playhead GPU acceleration** — `transform: translateX()` for smoother animation
+- **Adaptive hop size** — short files auto-adjust STFT hop to fill canvas
+
+### Improvements
+
+- Concurrency-limited loading (max 3 concurrent) and batch decoding (3 at a time)
+- Zombie track protection across async gaps
+- Shift-drag listener leak fix (register on mousedown, remove on mouseup)
+- Analyze All skips unloaded lazy placeholders
+- Serial message queue preserves correct card ordering
+
+### Bug Fixes
+
+- Fixed lazy load timeout (webview URI vs file:// URI mismatch)
+- Fixed silent file read failures (now sends error back to webview)
+- Fixed tar same-name collision, cache key collision, and deferred extraction issues
+- Fixed first file lost when right-click opening multiple selected files
+- Fixed `clearAll` not resetting async state (load queue, observer)
+- Fixed `lazyUri`/`filePath` lost during diff group rebuilds
+- Removed webview drag-drop (VS Code intercepts drops)
+
 ## 0.1.1
 
 ### New Features

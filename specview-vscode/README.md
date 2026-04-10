@@ -12,7 +12,7 @@ Based on [SpecView](https://github.com/RicherMans/SpecView) by Heinrich.
 
 Open any audio file to see its spectrogram rendered with a hot-metal colormap. Frequency labels and time rulers are displayed alongside the spectrogram for easy reference.
 
-Supported formats: **WAV, MP3, OGG, FLAC, M4A, AAC, WebM, WMA, AIFF, Opus**.
+Supported formats: **WAV, MP3, OGG, FLAC, M4A, AAC, WebM, WMA, AIFF, Opus** — plus **.tar / .tar.gz / .tgz** archives containing audio files.
 
 ### Audio Playback
 
@@ -89,7 +89,7 @@ Three levels of analysis:
 
 | Button | Location | Scope |
 |---|---|---|
-| **Analyze All** | Toolbar | All loaded tracks |
+| **Analyze All** | Toolbar | All loaded tracks (unloaded lazy tracks are skipped) |
 | **Analyze Group** | Group card header | All tracks in the group |
 | **Analyze** | Individual track / lane | Single track |
 
@@ -110,9 +110,11 @@ Files with the same name from different directories are automatically grouped, w
 | Method | Description |
 |---|---|
 | **Double-click** | Click an audio file in Explorer to open directly in SpecView |
-| **Right-click** | Select multiple audio files → "Open with SpecView" → opens in one panel |
+| **Right-click files** | Select multiple audio files → "Open with SpecView" → opens in one panel |
+| **Right-click folder** | Right-click a folder → "Open folder with SpecView" → loads all top-level audio files (natural sort) |
+| **Tar archives** | Open `.tar`/`.tar.gz`/`.tgz` via file dialog or right-click; audio files extracted on demand |
 | **Command Palette** | `Ctrl+Shift+P` → "SpecView: Open Audio File" → file picker |
-| **Click drop zone** | Click "Click to add audio files" area → file picker (defaults to last opened directory) |
+| **Click drop zone** | Click "Click to add audio files or archives" area → file picker (defaults to last opened directory) |
 
 ### Track Management
 
