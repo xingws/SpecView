@@ -49,6 +49,7 @@ Try the live demo at https://richermans.github.io/SpecView/ or https://xingws.gi
 | `Shift + ↓` | Zoom out (time axis) |
 | `Shift + ←` | Reset zoom (fit all) |
 | `Delete` | Remove active track (or remove lane from group) |
+| `Backspace` | Jump to start (second 0) |
 
 ## VS Code Extension
 

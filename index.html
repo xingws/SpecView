@@ -2448,6 +2448,7 @@ document.addEventListener('keydown',e=>{
   if(e.code==='Escape'){e.preventDefault();stopAll();}
   if(e.code==='ArrowLeft'&&!e.shiftKey){e.preventDefault();const t=getActive();if(t)seek(getPos(t)-2);}
   if(e.code==='ArrowRight'&&!e.shiftKey){e.preventDefault();const t=getActive();if(t)seek(getPos(t)+2);}
+  if(e.code==='Backspace'){e.preventDefault();const t=getActive();if(t){seek(0);}}
 });
 
 refreshUI();
