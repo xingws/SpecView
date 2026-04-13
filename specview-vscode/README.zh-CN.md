@@ -12,7 +12,7 @@
 
 打开任意音频文件即可查看其频谱图，使用热力色彩（hot-metal colormap）渲染。频谱图旁边显示频率标签和时间标尺，便于参考。
 
-支持的音频格式：**WAV、MP3、OGG、FLAC、M4A、AAC、WebM、WMA、AIFF、Opus**。
+支持的音频格式：**WAV、MP3、OGG、FLAC、M4A、AAC、WebM、WMA、AIFF、Opus**，以及包含音频文件的 **.tar / .tar.gz / .tgz** 归档。
 
 ### 音频播放
 
@@ -89,7 +89,7 @@
 
 | 按钮 | 位置 | 作用范围 |
 |---|---|---|
-| **Analyze All** | 工具栏 | 所有已加载的轨道 |
+| **Analyze All** | 工具栏 | 所有已加载的轨道（未加载的懒加载轨道会被跳过） |
 | **Analyze Group** | 分组卡片头部 | 当前分组内所有轨道 |
 | **Analyze** | 单个轨道 / Lane 标签 | 单个轨道 |
 
@@ -110,9 +110,11 @@
 | 方式 | 说明 |
 |---|---|
 | **双击** | 在资源管理器中双击音频文件，直接在 SpecView 中打开 |
-| **右键菜单** | 选中多个音频文件 → 右键 → "Open with SpecView" → 在同一窗口中打开 |
+| **右键文件** | 选中多个音频文件 → 右键 → "Open with SpecView" → 在同一窗口中打开 |
+| **右键文件夹** | 右键文件夹 → "Open folder with SpecView" → 加载文件夹内所有音频文件（顶层，按文件名自然排序） |
+| **Tar 归档** | 通过文件选择器或右键菜单打开 `.tar`/`.tar.gz`/`.tgz` 归档，音频文件按需提取 |
 | **命令面板** | `Ctrl+Shift+P` → 输入 "SpecView: Open Audio File" → 文件选择器 |
-| **点击添加区域** | 点击 "Click to add audio files" 区域 → 文件选择器（默认打开上次文件所在目录） |
+| **点击添加区域** | 点击 "Click to add audio files or archives" 区域 → 文件选择器（默认打开上次文件所在目录） |
 
 ### 轨道管理
 

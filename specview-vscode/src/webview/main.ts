@@ -3,7 +3,7 @@ import {
   initUI, handleFiles, togglePlay, stopAll, clearAll, seek,
   getActive, switchLane, getTracks,
   zoomIn, zoomOut, zoomFit, setWaveformVisible, pauseAll,
-  moveToNextCard, moveToPrevCard, deleteActiveTrack,
+  moveToNextCard, moveToPrevCard, deleteActiveTrack, handleFileURIs,
 } from './ui';
 import { getPos } from './audio';
 import { runAnalysisAll } from './analysis';
@@ -29,17 +29,76 @@ const vscode = acquireVsCodeApi();
 (window as any).__vscodePostMessage = vscode.postMessage.bind(vscode);
 
 // Listen for messages from extension host
-window.addEventListener('message', async (event) => {
+const fileDataCallbacks = new Map<string, { resolve: (raw: ArrayBuffer) => void; reject: (e: Error) => void }>();
+
+// Message handling: lazy-load callbacks are resolved synchronously (fast path),
+// everything else goes through a serial queue to preserve ordering
+// (ensures filesData finishes decoding before fileURIs creates lazy cards).
+let messageQueue = Promise.resolve();
+
+window.addEventListener('message', (event) => {
   const msg = event.data;
+
+  // Fast path: resolve lazy-load callbacks synchronously without entering the queue.
+  // This avoids blocking on large batch decodes that may be in the queue.
+  if (msg.type === 'fileData' && msg.filePath) {
+    const cb = fileDataCallbacks.get(msg.filePath);
+    if (cb) {
+      fileDataCallbacks.delete(msg.filePath);
+      cb.resolve(base64ToArrayBuffer(msg.base64));
+      return;
+    }
+    // Late response after timeout — discard
+    if (msg.filePath.startsWith('file://') || msg.filePath.startsWith('tar:')) return;
+  }
+  if (msg.type === 'fileDataError') {
+    const cb = fileDataCallbacks.get(msg.uri);
+    if (cb) {
+      fileDataCallbacks.delete(msg.uri);
+      cb.reject(new Error(msg.message));
+    }
+    return;
+  }
+
+  // Serial queue for everything else
+  messageQueue = messageQueue.then(() => handleMessage(msg)).catch(e => console.error('Message handler error:', e));
+});
+
+async function handleMessage(msg: any): Promise<void> {
   if (msg.type === 'fileData') {
     const raw = base64ToArrayBuffer(msg.base64);
     await decodeAndAddFile(msg.name, msg.filePath, raw);
   } else if (msg.type === 'filesData') {
     await decodeAndAddBatch(msg.files);
+  } else if (msg.type === 'archiveFiles') {
+    await decodeAndAddBatch(msg.files);
+  } else if (msg.type === 'fileURIs') {
+    handleFileURIs(msg.files);
   } else if (msg.type === 'error') {
     console.error('Extension error:', msg.message);
   }
-});
+}
+
+/**
+ * Request file data from extension host for lazy-loaded track.
+ * Returns decoded ArrayBuffer when data arrives.
+ */
+export function requestFileData(uri: string): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      fileDataCallbacks.delete(uri);
+      reject(new Error('Timeout requesting file data: ' + uri));
+    }, 30000);
+    fileDataCallbacks.set(uri, {
+      resolve: (raw: ArrayBuffer) => { clearTimeout(timeout); resolve(raw); },
+      reject: (e: Error) => { clearTimeout(timeout); reject(e); },
+    });
+    vscode.postMessage({ type: 'requestFileData', uri });
+  });
+}
+
+// Expose requestFileData globally for ui.ts to avoid circular dependency
+(window as any).__requestFileData = requestFileData;
 
 // Signal readiness to extension host
 vscode.postMessage({ type: 'ready' });
@@ -69,24 +128,32 @@ async function decodeAndAddFile(name: string, filePath: string | undefined, arra
   }
 }
 
+const DECODE_CONCURRENCY = 3;
+
 async function decodeAndAddBatch(files: { name: string; filePath?: string; base64: string }[]): Promise<void> {
-  const promises = files.map(async (f) => {
-    try {
-      const raw = base64ToArrayBuffer(f.base64);
-      const nativeSR = parseNativeSampleRate(raw) || null;
-      const decoded = await audioCtx.decodeAudioData(raw.slice(0));
-      return {
-        name: f.name,
-        filePath: f.filePath,
-        buffer: decoded,
-        nativeSR: nativeSR || decoded.sampleRate,
-      } as DecodedItem;
-    } catch (e) {
-      console.error('Decode error:', f.name, e);
-      return null;
-    }
-  });
-  const items = (await Promise.all(promises)).filter(Boolean) as DecodedItem[];
+  const items: DecodedItem[] = [];
+  // Process in chunks to limit concurrent memory usage
+  for (let i = 0; i < files.length; i += DECODE_CONCURRENCY) {
+    const chunk = files.slice(i, i + DECODE_CONCURRENCY);
+    const promises = chunk.map(async (f) => {
+      try {
+        const raw = base64ToArrayBuffer(f.base64);
+        const nativeSR = parseNativeSampleRate(raw) || null;
+        const decoded = await audioCtx.decodeAudioData(raw.slice(0));
+        return {
+          name: f.name,
+          filePath: f.filePath,
+          buffer: decoded,
+          nativeSR: nativeSR || decoded.sampleRate,
+        } as DecodedItem;
+      } catch (e) {
+        console.error('Decode error:', f.name, e);
+        return null;
+      }
+    });
+    const results = (await Promise.all(promises)).filter(Boolean) as DecodedItem[];
+    items.push(...results);
+  }
   if (items.length > 0) handleFiles(items);
 }
 
@@ -152,3 +219,5 @@ document.addEventListener('visibilitychange', () => {
     pauseAll();
   }
 });
+
+

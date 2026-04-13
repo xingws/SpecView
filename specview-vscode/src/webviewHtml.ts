@@ -52,8 +52,8 @@ export function getWebviewHtml(
 
 <div id="drop-zone" class="empty">
   <div class="dz-icon">&#127925;</div>
-  <div class="dz-text">Click to add audio files</div>
-  <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &mdash; matching suffixes auto-grouped for diff</div>
+  <div class="dz-text">Click to add audio files or archives</div>
+  <div class="dz-sub">Supports MP3, WAV, OGG, FLAC, M4A &amp; .tar/.tar.gz archives &mdash; or right-click folders in Explorer</div>
 </div>
 
 <div id="tracks-container"></div>
