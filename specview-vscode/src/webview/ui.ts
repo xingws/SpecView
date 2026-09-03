@@ -1,7 +1,7 @@
 import type { Track, Group, DecodedItem } from './types';
 import { SPEC_H, SPEC_H_DIFF, renderSpec, drawSpec, drawWaveform, getWaveformHeight } from './spectrogram';
 import { TAG_CSS, stripExt, extractTag, groupByBaseName, getParentFolderName, parseNativeSampleRate } from './grouping';
-import { playSource, stopSource, getPos, resumeAudio } from './audio';
+import { playSource, stopSource, getPos, resumeAudio, decodeToAudioBuffer } from './audio';
 import { runAnalysis, runAnalysisGroup } from './analysis';
 import { fmt, fmtShort, esc } from './util';
 
@@ -114,7 +114,7 @@ async function loadTrack(t: Track): Promise<void> {
       // Check if track was removed during async gap
       if (!isTrackAlive(t)) return;
       const nativeSR = parseNativeSampleRate(raw) || null;
-      const decoded = await (window as any).__audioCtx.decodeAudioData(raw.slice(0));
+      const decoded = await decodeToAudioBuffer(raw);
       // Check again after second async gap
       if (!isTrackAlive(t)) return;
       t.buffer = decoded;
@@ -572,7 +572,7 @@ export function zoomFit(): void {
 // ========== CARD NAVIGATION ==========
 
 export function moveToNextCard(): void {
-  const cards = Array.from(tracksBox.children) as HTMLElement[];
+  const cards = Array.from(tracksBox.children).filter(c => !c.classList.contains('scroll-sentinel')) as HTMLElement[];
   if (cards.length === 0) return;
   const active = getActive();
   if (!active || !active.el) { if (tracks.length) setActive(tracks[0].id); return; }
@@ -588,7 +588,7 @@ export function moveToNextCard(): void {
 }
 
 export function moveToPrevCard(): void {
-  const cards = Array.from(tracksBox.children) as HTMLElement[];
+  const cards = Array.from(tracksBox.children).filter(c => !c.classList.contains('scroll-sentinel')) as HTMLElement[];
   if (cards.length === 0) return;
   const active = getActive();
   if (!active || !active.el) { if (tracks.length) setActive(tracks[0].id); return; }
@@ -875,7 +875,7 @@ function placeCardAtPosition(placeholder: HTMLElement): void {
   placeholder.remove();
 }
 
-function createStandalone(name: string, buffer: AudioBuffer | null, nativeSR: number, filePath?: string, lazyUri?: string): void {
+function createStandalone(name: string, buffer: AudioBuffer | null, nativeSR: number, filePath?: string, lazyUri?: string): HTMLElement {
   const t = mkTrack(name, buffer, nativeSR, filePath, lazyUri);
   const infoText = t.loaded && buffer
     ? (function(){ const ch = buffer.numberOfChannels === 1 ? 'Mono' : buffer.numberOfChannels === 2 ? 'Stereo' : buffer.numberOfChannels + 'ch'; return ch + ' ' + (t.sr / 1000).toFixed(1) + 'kHz | ' + fmt(t.duration); })()
@@ -907,9 +907,10 @@ function createStandalone(name: string, buffer: AudioBuffer | null, nativeSR: nu
   } else {
     lazyObserver.observe(card);
   }
+  return card;
 }
 
-function createDiffGroup(baseName: string, items: DecodedItem[]): void {
+function createDiffGroup(baseName: string, items: DecodedItem[]): HTMLElement {
   const gid = nextGrpId++;
   const grpTracks: Track[] = [];
   const anyLoaded = items.some(i => !!i.buffer);
@@ -986,9 +987,10 @@ function createDiffGroup(baseName: string, items: DecodedItem[]): void {
   if (grpTracks.some(t => !t.loaded)) {
     lazyObserver.observe(card);
   }
+  return card;
 }
 
-function addToDiffGroup(grp: Group, newItem: DecodedItem): void {
+function addToDiffGroup(grp: Group, newItem: DecodedItem): HTMLElement {
   const existingItems = grp.trackIds.map(id => {
     const t = tracks.find(tr => tr.id === id);
     if (!t) return null;
@@ -1000,8 +1002,9 @@ function addToDiffGroup(grp: Group, newItem: DecodedItem): void {
   const ph = insertPlaceholderBefore(grp.el);
   removeDiffGroupQuietly(grp.id);
   existingItems.push(newItem);
-  createDiffGroup(grp.baseName, existingItems);
+  const el = createDiffGroup(grp.baseName, existingItems);
   placeCardAtPosition(ph);
+  return el;
 }
 
 function notifyRemoveFromLoaded(t: Track): void {
@@ -1152,10 +1155,12 @@ function computeDisplayNames(items: DecodedItem[]): void {
   }
 }
 
-export function handleFiles(items: DecodedItem[]): void {
+export function handleFiles(items: DecodedItem[]): (HTMLElement | null)[] {
   const grouped = groupByBaseName(items);
+  const els: (HTMLElement | null)[] = [];
 
   for (const grp of grouped) {
+    let el: HTMLElement | null = null;
     if (grp.items.length >= 2) {
       const existingMatch = findExistingStandaloneByStem(grp.baseName);
       let ph: HTMLElement | null = null;
@@ -1184,7 +1189,7 @@ export function handleFiles(items: DecodedItem[]): void {
         }
       }
       computeDisplayNames(grp.items);
-      createDiffGroup(grp.baseName, grp.items);
+      el = createDiffGroup(grp.baseName, grp.items);
       if (ph) placeCardAtPosition(ph);
     } else {
       const newItem = grp.items[0];
@@ -1202,7 +1207,7 @@ export function handleFiles(items: DecodedItem[]): void {
           { ...newItem, suffix: tag },
         ];
         computeDisplayNames(mergeItems);
-        createDiffGroup(stem, mergeItems);
+        el = createDiffGroup(stem, mergeItems);
         placeCardAtPosition(ph);
       } else if (existingMatch && newItem.filePath && existingMatch.filePath !== newItem.filePath) {
         // No known tag, but same stem and different directories — same-name different-dir merge
@@ -1214,63 +1219,191 @@ export function handleFiles(items: DecodedItem[]): void {
           { ...newItem, suffix: getParentFolderName(newItem.filePath) },
         ];
         computeDisplayNames(mergeItems);
-        createDiffGroup(stem, mergeItems);
+        el = createDiffGroup(stem, mergeItems);
         placeCardAtPosition(ph);
       } else {
         const existingGroup = findExistingGroupByStem(stem);
         if (existingGroup && tag) {
           // Known tag — add to existing group
-          addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
+          el = addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
         } else if (existingGroup) {
           // No known tag — add with parent folder name as suffix
-          addToDiffGroup(existingGroup, { ...newItem, suffix: newItem.filePath ? getParentFolderName(newItem.filePath) : undefined });
+          el = addToDiffGroup(existingGroup, { ...newItem, suffix: newItem.filePath ? getParentFolderName(newItem.filePath) : undefined });
         } else {
-          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.filePath, newItem.lazyUri);
+          el = createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.filePath, newItem.lazyUri);
         }
       }
     }
+    els.push(el);
   }
   refreshUI();
+  return els;
 }
 
-/**
- * Create lazy placeholder tracks from file URIs (sent by extension host for on-demand loading).
- * Tracks are created in batches (100 at a time) with a "Load More" button.
- */
-const LOAD_MORE_BATCH = 100;
-let fileURIsQueue: { name: string; uri: string }[] = [];
-let loadMoreBtn: HTMLElement | null = null;
+/* ============================================================================
+ * WINDOWED / VIRTUALIZED LAZY LOADING
+ *
+ * Lazy file URIs (sent by the extension host for large sets) are never all
+ * materialized as cards at once. They sit in `pendingGroups` (grouped by stem
+ * so A/B diff pairs are kept together) and are rendered through a bounded
+ * window: a bottom sentinel reveals more on scroll-down, and cards that scroll
+ * far above the viewport are recycled (released) and restored on scroll-up, so
+ * the DOM stays small regardless of how many files the user scrolls through.
+ * ========================================================================== */
+const INITIAL_RENDER = 10;
+const SCROLL_BATCH = 30;
+const MAX_RENDERED = 500;
+
+interface WindowGroup { baseName: string; items: DecodedItem[]; }
+interface WindowRec { group: WindowGroup; el: HTMLElement | null; }
+
+let pendingGroups: WindowGroup[] = [];
+let renderedCards: WindowRec[] = [];
+let releasedTop: WindowRec[] = [];
+let sentinelEl: HTMLElement | null = null;
+let topSentinelEl: HTMLElement | null = null;
+let sentinelObserver: IntersectionObserver | null = null;
+let topObserver: IntersectionObserver | null = null;
+
+function makeSentinel(): HTMLElement {
+  const d = document.createElement('div');
+  d.className = 'scroll-sentinel';
+  d.style.cssText = 'height:1px;width:1px;';
+  return d;
+}
+
+function cardElConnected(el: HTMLElement | null): boolean {
+  return !!el && el.isConnected;
+}
+
+function recTracks(r: WindowRec): Track[] {
+  if (!r.el) return [];
+  const g = groups.find(gr => gr.el === r.el);
+  if (g) return g.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean) as Track[];
+  const t = tracks.find(tr => tr.el === r.el);
+  return t ? [t] : [];
+}
+
+function isPinnedRec(r: WindowRec): boolean {
+  if (!cardElConnected(r.el)) return true;
+  return recTracks(r).some(t => t.playing || (t.analysisResults && t.analysisResults.length > 0));
+}
+
+function fixActiveTrack(): void {
+  if (activeTrackId !== null && !tracks.some(t => t.id === activeTrackId)) activeTrackId = null;
+}
+
+function removeCardByEl(el: HTMLElement): void {
+  const g = groups.find(gr => gr.el === el);
+  if (g) { removeDiffGroupQuietly(g.id); return; }
+  const t = tracks.find(tr => tr.el === el && tr.groupId == null);
+  if (t) removeTrackQuietly(t.id);
+}
+
+/* Drop window records whose card was merged away into another card. */
+function pruneRendered(): void {
+  renderedCards = renderedCards.filter(r => cardElConnected(r.el));
+}
+
+function recycleTop(): void {
+  while (renderedCards.length > MAX_RENDERED) {
+    const r = renderedCards.shift()!;
+    if (isPinnedRec(r)) { renderedCards.unshift(r); break; }
+    removeCardByEl(r.el!);
+    r.el = null;
+    releasedTop.push(r);
+  }
+  fixActiveTrack();
+}
+
+/** Keep restoring while the recycled boundary stays near the top, so parking
+    at the very top fully restores the list instead of leaving a gap. */
+let drainTopRunning = false;
+function drainTop(): void {
+  drainTopRunning = false;
+  if (!releasedTop.length || !topSentinelEl || !topSentinelEl.isConnected) return;
+  const box = tracksBox.getBoundingClientRect();
+  const sent = topSentinelEl.getBoundingClientRect();
+  if (sent.top < box.top - 2500 || sent.bottom > box.bottom + 2500) return;
+  restoreTop(SCROLL_BATCH);
+  if (!drainTopRunning) {
+    drainTopRunning = true;
+    requestAnimationFrame(drainTop);
+  }
+}
+
+function updateSentinels(): void {
+  if (pendingGroups.length) {
+    if (!sentinelEl) { sentinelEl = makeSentinel(); sentinelObserver!.observe(sentinelEl); }
+    tracksBox.appendChild(sentinelEl);
+  } else if (sentinelEl) {
+    sentinelObserver!.unobserve(sentinelEl);
+    sentinelEl.remove();
+    sentinelEl = null;
+  }
+  if (releasedTop.length) {
+    if (!topSentinelEl) { topSentinelEl = makeSentinel(); topObserver!.observe(topSentinelEl); }
+    const firstCard = renderedCards.find(r => cardElConnected(r.el));
+    const anchor = (firstCard && firstCard.el) || (tracksBox.firstChild as HTMLElement | null);
+    tracksBox.insertBefore(topSentinelEl, anchor);
+  } else if (topSentinelEl) {
+    topObserver!.unobserve(topSentinelEl);
+    topSentinelEl.remove();
+    topSentinelEl = null;
+  }
+}
+
+/** Materialize up to `count` groups from the head of the pending queue. */
+function renderWindow(count: number): void {
+  while (count-- > 0 && pendingGroups.length) {
+    const g = pendingGroups.shift()!;
+    const els = handleFiles(g.items);
+    const el = (els && els[0]) || null;
+    renderedCards.push({ group: g, el });
+  }
+  pruneRendered();
+  recycleTop();
+  updateSentinels();
+}
+
+/** Restore recycled cards at the top when the user scrolls back up. */
+function restoreTop(count: number): void {
+  while (count-- > 0 && releasedTop.length) {
+    const r = releasedTop.pop()!;
+    const anchorRec = renderedCards.find(c => cardElConnected(c.el));
+    const anchor = (anchorRec && anchorRec.el) || null;
+    const els = handleFiles(r.group.items);
+    r.el = (els && els[0]) || null;
+    renderedCards.unshift(r);
+    if (cardElConnected(r.el) && anchor && cardElConnected(anchor) && r.el !== anchor && anchor.parentNode === tracksBox && r.el!.parentNode === tracksBox) {
+      tracksBox.insertBefore(r.el!, anchor);
+    }
+  }
+  /* keep the window bounded: overflow at the bottom is re-queued */
+  while (renderedCards.length > MAX_RENDERED) {
+    const r = renderedCards.pop()!;
+    if (r.el && r.el.isConnected) removeCardByEl(r.el);
+    r.el = null;
+    pendingGroups.unshift(r.group);
+  }
+  fixActiveTrack();
+  updateSentinels();
+}
 
 export function handleFileURIs(files: { name: string; uri: string }[]): void {
-  fileURIsQueue = fileURIsQueue.concat(files);
-  loadMoreFileURIs();
-}
-
-export function loadMoreFileURIs(): void {
-  const batch = fileURIsQueue.splice(0, LOAD_MORE_BATCH);
-  // Convert lazy URIs to DecodedItems so handleFiles can do proper grouping
-  // (same stem → diff group, same name different dir → diff group, etc.)
-  const items: DecodedItem[] = batch.map(f => ({
+  // Convert lazy URIs to DecodedItems, then (re)group the whole pending set so
+  // A/B pairs that share a stem are kept together for diff grouping.
+  const newItems: DecodedItem[] = files.map(f => ({
     name: f.name,
     buffer: null,
     nativeSR: 0,
     filePath: f.uri,   // URI string used for directory-based grouping
     lazyUri: f.uri,
   }));
-  if (items.length > 0) handleFiles(items);
-  updateLoadMoreBtn();
-  // refreshUI already called by handleFiles, but ensure btn state is up to date
-}
-
-function updateLoadMoreBtn(): void {
-  if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
-  if (fileURIsQueue.length > 0) {
-    loadMoreBtn = document.createElement('div');
-    loadMoreBtn.className = 'load-more-bar';
-    loadMoreBtn.innerHTML = '<button class="btn load-more-btn">Load more (' + fileURIsQueue.length + ' remaining)</button>';
-    loadMoreBtn.querySelector('.load-more-btn')!.addEventListener('click', loadMoreFileURIs);
-    tracksBox.appendChild(loadMoreBtn);
-  }
+  const combined = pendingGroups.flatMap(g => g.items).concat(newItems);
+  pendingGroups = groupByBaseName(combined).map(g => ({ baseName: g.baseName, items: g.items }));
+  renderWindow(INITIAL_RENDER);
+  updateSentinels();
 }
 
 export function clearAll(): void {
@@ -1280,11 +1413,14 @@ export function clearAll(): void {
   tracks = [];
   groups = [];
   activeTrackId = null;
-  fileURIsQueue = [];
+  pendingGroups = [];
+  renderedCards = [];
+  releasedTop = [];
   loadQueue.length = 0;
   activeLoads = 0;
   lazyObserver.disconnect();
-  if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
+  if (sentinelEl) { sentinelObserver!.unobserve(sentinelEl); sentinelEl = null; }
+  if (topSentinelEl) { topObserver!.unobserve(topSentinelEl); topSentinelEl = null; }
   tracksBox.innerHTML = '';
   refreshUI();
 }
@@ -1301,6 +1437,13 @@ export function initUI(): void {
   timeDisp = document.getElementById('time-display')!;
   playIcon = document.getElementById('play-icon')!;
   playLabel = document.getElementById('play-label')!;
+
+  sentinelObserver = new IntersectionObserver(entries => {
+    if (entries.some(e => e.isIntersecting)) renderWindow(SCROLL_BATCH);
+  }, { root: tracksBox, rootMargin: '2000px 0px' });
+  topObserver = new IntersectionObserver(entries => {
+    if (entries.some(e => e.isIntersecting)) drainTop();
+  }, { root: tracksBox, rootMargin: '2000px 0px' });
 
   refreshUI();
 }

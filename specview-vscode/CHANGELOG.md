@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+### New Features
+
+- **Windowed / virtualized lazy loading** — large file sets are no longer gated behind "Load more" clicks. Only a bounded window of cards is rendered; a scroll sentinel reveals more as you scroll (infinite scroll), cards that scroll far off-screen are recycled, and scrolling back up restores them. DOM stays small even with thousands of files.
+- **Fast PCM WAV decoding** — plain `.wav` files are decoded with a native-rate RIFF/PCM path instead of `decodeAudioData`, making webdataset-style archives decode much faster (and preserves the source sample rate).
+
 ## 0.1.3
 
 ### Bug Fixes

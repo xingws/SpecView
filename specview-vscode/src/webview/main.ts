@@ -1,4 +1,4 @@
-import { initAudio, setVolume } from './audio';
+import { initAudio, setVolume, decodeToAudioBuffer } from './audio';
 import {
   initUI, handleFiles, togglePlay, stopAll, clearAll, seek,
   getActive, switchLane, getTracks,
@@ -19,7 +19,7 @@ styleEl.textContent = STYLES;
 document.head.appendChild(styleEl);
 
 // Initialize audio
-const { audioCtx } = initAudio();
+initAudio();
 
 // Initialize UI
 initUI();
@@ -120,7 +120,7 @@ async function base64ToArrayBuffer(base64: string): Promise<ArrayBuffer> {
 async function decodeAndAddFile(name: string, filePath: string | undefined, arrayBuffer: ArrayBuffer): Promise<void> {
   try {
     const nativeSR = parseNativeSampleRate(arrayBuffer) || null;
-    const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+    const decoded = await decodeToAudioBuffer(arrayBuffer);
     const item: DecodedItem = {
       name,
       filePath,
@@ -145,7 +145,7 @@ async function decodeAndAddBatch(files: { name: string; filePath?: string; base6
       try {
         const raw = await base64ToArrayBuffer(f.base64);
         const nativeSR = parseNativeSampleRate(raw) || null;
-        const decoded = await audioCtx.decodeAudioData(raw.slice(0));
+        const decoded = await decodeToAudioBuffer(raw);
         return {
           name: f.name,
           filePath: f.filePath,

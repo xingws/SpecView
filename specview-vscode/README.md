@@ -34,7 +34,7 @@ Toggle the waveform view via the **Waveform** checkbox in the toolbar to display
 
 ### Lazy Loading
 
-For large file sets, tracks are decoded on scroll for fast initial loading. A "Load More" button appears at the bottom of the track list to load the next batch of files on demand.
+For large file sets, tracks are decoded on scroll for fast initial loading, and the card list is **windowed** — a bounded number of cards are rendered and more appear as you scroll (infinite scroll). Far-offscreen cards are recycled and restored on scroll-back, so the DOM stays light even with thousands of files.
 
 ### Time Axis Zoom
 
