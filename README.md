@@ -16,10 +16,10 @@ Co-developed across two repositories:
 - **Spectrogram Visualization** — hot-metal colormap, frequency labels, time ruler
 - **Audio Playback** — play, pause, stop, seek, volume; click spectrogram to seek
 - **Auto-Grouping** — 32 recognized tags for A/B comparison (suffix and prefix modes)
-- **Tar/Tar.gz Archive Support** — open archives containing audio files; files extracted on demand
+- **Tar/Tar.gz Archive Support** — open archives containing audio files; entries indexed on demand with a bounded in-memory cache (never holds the whole archive)
 - **Time Axis Zoom** — Ctrl+wheel zoom, Shift+drag box selection, toolbar +/–/Fit; STFT cached; group sync
 - **Time-Domain Waveform** — toggle via toolbar; amplitude labels; time-aligned with spectrogram
-- **Lazy Loading** — large file sets decode on scroll; batched card creation with "Load More" button
+- **Lazy Loading** — large file sets decode on scroll; windowed card rendering with infinite scroll and DOM recycling (keeps huge archives snappy and lightweight)
 - **ML Audio Classification** — CED-tiny ONNX model (527 AudioSet labels); Analyze All / Group / per-track
 - **Track Management** — Delete key or × button; card position preserved on deletion/merge
 - **Card Navigation** — Up/Down arrow keys with smooth scrolling

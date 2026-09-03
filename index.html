@@ -6,7 +6,6 @@
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <title>SpecView - Spectrogram Player</title>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/js-untar@2.0.0/build/dist/untar.js"></script>
 <style>
 :root {
   --bg: #f0f0f0;
@@ -168,6 +167,138 @@ body {
 }
 .card-remove:hover { color: var(--red); }
 
+/* ===== PAIRED JSON METADATA PANEL ===== */
+.card-row {
+  display: flex;
+  align-items: flex-start;
+}
+.card-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.meta-aside {
+  display: none;
+  flex: 0 0 auto;
+  width: var(--meta-width, 300px);
+  max-width: calc(100% - 220px);
+  flex-direction: column;
+  border-left: 1px solid var(--border-light);
+  background: #fbfbfd;
+  overflow: hidden;
+}
+body.meta-on .meta-aside, .meta-aside.show { display: flex; }
+/* slim drag handle between the audio column and the JSON panel; only shown
+   while the panel itself is visible (near the viewport with JSON on) */
+.meta-resizer {
+  display: none;
+  flex: 0 0 9px;
+  cursor: col-resize;
+  align-self: stretch;
+  position: relative;
+  z-index: 2;
+}
+.card-row:has(.meta-aside.show) .meta-resizer { display: block; }
+.meta-resizer::before {
+  content: '';
+  position: absolute; top: 0; bottom: 0; left: 4px;
+  width: 1px; background: transparent;
+  transition: background .12s ease;
+}
+.meta-resizer:hover::before, .meta-resizer.dragging::before {
+  width: 3px; left: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+.meta-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 10px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
+  color: var(--text-dim);
+  background: #f3f3f6;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+}
+.meta-head-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.meta-clear {
+  background: none; border: none; color: var(--text-sub); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 0 2px; flex-shrink: 0; display: none;
+}
+.meta-clear:hover { color: var(--red); }
+body.meta-sel .meta-clear { display: inline-block; }
+.meta-pill {
+  background: #fff; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 5px; cursor: pointer; font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.4px; padding: 1px 6px; flex-shrink: 0;
+}
+.meta-pill:hover { border-color: var(--accent); color: var(--accent); background: rgba(59,130,246,0.06); }
+.meta-body {
+  flex: 1; overflow: auto; margin: 0; padding: 8px 10px 12px;
+  font: 11px/1.5 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  color: #24292f; white-space: pre-wrap; word-break: break-word; tab-size: 2; min-height: 0;
+  user-select: text; -webkit-user-select: text;
+}
+.meta-empty { color: var(--text-sub); font-style: italic; }
+.meta-err { color: #c0392b; font-style: italic; margin-bottom: 6px; white-space: normal; }
+.meta-raw { margin: 0; color: #c0392b; white-space: pre; overflow: auto; }
+.meta-trunc { margin-top: 8px; color: var(--text-sub); font-style: italic; }
+.json-line { line-height: 1.5; }
+.jv-key  { color: #0451a5; font-weight: 600; }
+.js-meta-key { cursor: pointer; border-radius: 3px; }
+.js-meta-key:hover { background: #e3ecf9; }
+.meta-key-on { background: #d6e4f5; }
+.meta-key-on:hover { background: #c3d8f0; }
+.jv-str  { color: #a31515; }
+.jv-num  { color: #098658; }
+.jv-bool { color: #0000ff; }
+.jv-null { color: #0000ff; font-style: italic; }
+.jv-punc { color: #383a42; }
+
+/* selected-field blocks shown on every row */
+.meta-sel {
+  border: 1px solid var(--border-light); border-radius: 6px;
+  background: #fcfcfe; margin: 0 0 6px; padding: 3px 6px;
+}
+.meta-sel-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.meta-sel-lbl {
+  background: #eef3fb; border: 1px solid #d4e0f0; color: #0b4b93;
+  border-radius: 4px; font: 600 9px/1 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 6px; cursor: pointer;
+}
+.meta-sel-lbl:hover { background: #dfe9f7; color: #063d78; }
+.meta-sel-val { font: inherit; white-space: pre-wrap; word-break: break-word; }
+.meta-sel-missing { font-size: 10px; font-style: italic; color: var(--text-sub); }
+.meta-tree-below { border-top: 1px dashed var(--border-light); margin-top: 6px; padding-top: 6px; }
+
+/* in-panel field list overlay */
+.meta-pop {
+  position: fixed; z-index: 1000; width: 320px; max-width: 92vw; max-height: 70vh;
+  display: none; flex-direction: column;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.18); overflow: hidden;
+}
+.meta-pop.open { display: flex; }
+.mpo-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: #f5f5f7; border-bottom: 1px solid var(--border-light); font-size: 11px; font-weight: 700;
+}
+.mpo-head .mpo-title { flex: 1; }
+.mpo-x { background: none; border: none; font-size: 15px; line-height: 1; cursor: pointer; color: var(--text-sub); }
+.mpo-x:hover { color: var(--red); }
+.mpo-search { margin: 8px 10px 4px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+.mpo-list { overflow: auto; max-height: 44vh; padding: 2px 6px 8px; }
+.mpo-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 3px 6px; border-radius: 5px; font-size: 11px; cursor: pointer;
+}
+.mpo-item:hover { background: #f2f2f6; }
+.mpo-item input { margin: 0; flex: 0 0 auto; }
+.mpo-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #24292f; }
+.mpo-count { flex: 0 0 auto; color: var(--text-dim); font-size: 10px; background: #ececef; padding: 0 6px; border-radius: 8px; }
+.mpo-foot { padding: 6px 10px; border-top: 1px solid var(--border-light); color: var(--text-sub); font-size: 10px; font-style: italic; }
+.mpo-empty { padding: 10px; color: var(--text-sub); font-size: 11px; }
+
 .diff-badge {
   font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px; letter-spacing: 0.3px;
   background: rgba(59,130,246,0.1); color: var(--accent); border: 1px solid rgba(59,130,246,0.25);
@@ -249,6 +380,11 @@ body {
   position: absolute; top: 0; left: 0; width: 2px; height: 100%;
   background: var(--playhead); pointer-events: none; z-index: 10;
   box-shadow: 0 0 6px var(--playhead-glow);
+}
+/* Only promote playheads to their own compositor layer while actually
+   playing. Creating hundreds of layers up-front (one per track) is wasteful
+   and can exhaust the GPU/compositor, making the whole page crawl. */
+body.playback .playhead, body.playback .wf-playhead {
   will-change: transform;
 }
 
@@ -344,19 +480,28 @@ body {
 .load-more-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 /* ===== FULL-PAGE DROP OVERLAY ===== */
 .drop-overlay {
-  position: fixed; inset: 0; z-index: 999;
-  background: rgba(59,130,246,0.08);
-  border: 3px dashed var(--accent);
+  position: fixed; left: 16px; bottom: 16px; z-index: 999;
   display: none;
-  align-items: center; justify-content: center;
+  align-items: center; justify-content: flex-start;
   pointer-events: none;
+  max-width: min(60vw, 420px);
 }
 .drop-overlay.visible { display: flex; }
 .drop-overlay-text {
-  background: var(--bg-card); color: var(--accent); font-size: 16px; font-weight: 600;
-  padding: 12px 28px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-  border: 1px solid var(--accent);
+  background: rgba(30,30,40,0.92); color: #fff; font-size: 12px; font-weight: 500;
+  padding: 6px 12px; border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,0.25);
 }
+
+/* tiny non-blocking streaming counter (bottom-left, out of the way) */
+.stream-prog {
+  position: fixed; left: 16px; bottom: 16px; z-index: 2000;
+  background: rgba(30,30,40,0.92); color: #fff;
+  padding: 5px 10px; border-radius: 6px; font-size: 11px;
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  pointer-events: none; opacity: 0; transform: translateY(4px);
+  transition: opacity .2s, transform .2s;
+}
+.stream-prog.show { opacity: 1; transform: translateY(0); }
 </style>
 </head>
 <body>
@@ -388,6 +533,10 @@ body {
     <input type="checkbox" id="chk-waveform"> Waveform
   </label>
   <div class="sep"></div>
+  <label class="meta-toggle" style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap" title="Show paired .json metadata to the right of each track">
+    <input type="checkbox" id="chk-meta"> JSON
+  </label>
+  <div class="sep"></div>
   <button class="btn" id="btn-clear">Clear All</button>
 </div>
 
@@ -414,6 +563,15 @@ const SPEC_H_DIFF = 180;
 const HOP_DIV     = 4;
 const DB_RANGE    = 90;     // dB dynamic range
 const LAZY_THRESH = 10;     // ≥ this many files → lazy-load (decode on scroll into view)
+
+/* Windowed/virtualized card rendering: with huge archives we never build all
+   cards at once. Only a small window is materialized into the DOM; a scroll
+   sentinel reveals more, and far-offscreen cards are recycled. */
+const INITIAL_RENDER = 10;  // cards rendered immediately on drop
+const SCROLL_BATCH   = 30;  // cards revealed per scroll (infinite scroll)
+const MAX_RENDERED   = 500; // hard cap on rendered cards (older ones recycled)
+const ARCH_PREWARM   = 64;  // archive entries cached during the index pass (LRU warm)
+const ARCH_LRU_CAP   = 64;  // max archive entries retained in the on-demand LRU cache
 
 /* Ocenaudio-style hot-metal colormap:
    black → deep navy → blue → purple → magenta → red → orange → yellow → white */
@@ -488,7 +646,11 @@ gainNode.gain.value = 0.8;
 
 let tracks = [], groups = [], nextId = 1, nextGrpId = 1;
 let activeTrackId = null, rafId = null;
-let fileURIsQueue = [], loadMoreBtn = null;
+let pendingCards = [];   /* grouped descriptors not yet rendered (in order) */
+let renderedCards = [];  /* descriptors currently in the DOM (in order) */
+let releasedTop = [];    /* descriptors recycled from the top (in order) */
+let sentinelEl = null, topSentinelEl = null;
+let metaVisible = false;   /* paired .json metadata panels on/off */
 
 volSlider.addEventListener('input', () => { gainNode.gain.value = volSlider.value / 100; });
 
@@ -497,7 +659,7 @@ volSlider.addEventListener('input', () => { gainNode.gain.value = volSlider.valu
  *  Cards with unloaded tracks are observed. When they enter the viewport
  *  (+ 800px margin), their tracks are enqueued for decoding (max 3 concurrent).
  * ======================================================================== */
-const MAX_CONCURRENT_LOADS = 3;
+const MAX_CONCURRENT_LOADS = 6;
 let activeLoads = 0;
 const loadQueue = [];
 
@@ -531,6 +693,541 @@ const lazyObserver = new IntersectionObserver(entries => {
   }
 }, { root: tracksBox, rootMargin: '800px 0px' });
 
+/* ========================================================================
+ *  OFFSCREEN CANVAS RECLAIM
+ *
+ *  A decoded track's <canvas> holds a full-resolution RGBA backing store
+ *  (~1MB per track at typical widths).  With hundreds of tracks loaded this
+ *  grows without bound and eventually exhausts the compositor/GPU, making
+ *  the tab crawl and crash.  We therefore only keep the backing store for
+ *  tracks near the viewport: when a painted track scrolls out past a wide
+ *  margin its canvases are shrunk (freed), and they are repainted from the
+ *  cached dB columns (specData, ~300KB) as soon as they scroll back near.
+ *  ======================================================================== */
+const paintByCanvas = new WeakMap();          /* canvas -> track */
+const paintObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    const t = paintByCanvas.get(entry.target);
+    if (!t || !t.loaded) continue;
+    if (entry.isIntersecting) paintTrackCanvas(t);
+    else releaseTrackCanvas(t);
+  }
+}, { root: tracksBox, rootMargin: '1600px 0px' });
+
+/* Redraw a track's canvases at the correct size from its cached spec data. */
+function paintTrackCanvas(t) {
+  if (t._painted) return;
+  if (!t.specData || !t.wrapper || !t.canvas) return;
+  const w = t.wrapper.clientWidth;
+  if (!(w > 0)) return;
+  t.canvas.width = w;
+  if (t.canvas._h) t.canvas.height = t.canvas._h;
+  drawSpec(t);
+  if (t.waveformCanvas) {
+    t.waveformCanvas.width = w;
+    if (t.waveformCanvas._h) t.waveformCanvas.height = t.waveformCanvas._h;
+    if (waveformVisible) drawWaveform(t);
+  }
+  t._painted = true;
+  if (!t._paintedWatched && t.canvas) {
+    t._paintedWatched = true;
+    paintObserver.observe(t.canvas);
+  }
+}
+/* Drop a far-offscreen track's canvas backing stores (cheap repaint later). */
+function releaseTrackCanvas(t) {
+  if (!t._painted) return;
+  t._painted = false;
+  if (t.canvas) { t.canvas.width = 1; t.canvas.height = 1; }
+  if (t.waveformCanvas) { t.waveformCanvas.width = 1; t.waveformCanvas.height = 1; }
+}
+function unwatchPaint(t) {
+  if (t._paintedWatched && t.canvas) { t._paintedWatched = false; paintObserver.unobserve(t.canvas); }
+}
+
+/* ========================================================================
+ *  WINDOWED / VIRTUALIZED CARD RENDERING
+ *
+ *  pendingCards  → descriptors not yet rendered (newest at the end)
+ *  renderedCards → descriptors currently in the DOM (top → bottom order)
+ *  releasedTop   → descriptors recycled from the top (in order)
+ *
+ *  A bottom sentinel reveals the next batch on scroll-down; a top sentinel
+ *  restores recycled cards on scroll-up. The rendered window is capped at
+ *  MAX_RENDERED: overflow is recycled from the top (scroll-down) or re-queued
+ *  from the bottom (scroll-up) so the DOM stays small regardless of archive
+ *  size.
+ * ======================================================================== */
+const sentinelObserver = new IntersectionObserver(entries => {
+  if (entries.some(e => e.isIntersecting)) renderWindow(SCROLL_BATCH);
+}, { root: tracksBox, rootMargin: '2000px 0px' });
+const topObserver = new IntersectionObserver(entries => {
+  if (entries.some(e => e.isIntersecting)) restoreTop(SCROLL_BATCH);
+}, { root: tracksBox, rootMargin: '2000px 0px' });
+
+function makeSentinel() {
+  const d = document.createElement('div');
+  d.className = 'scroll-sentinel';
+  d.style.cssText = 'height:1px;width:1px;flex:0 0 1px;';
+  return d;
+}
+function updateSentinels() {
+  if (pendingCards.length) {
+    if (!sentinelEl) { sentinelEl = makeSentinel(); sentinelObserver.observe(sentinelEl); }
+    tracksBox.appendChild(sentinelEl);
+  } else if (sentinelEl) {
+    sentinelObserver.unobserve(sentinelEl);
+    sentinelEl.remove(); sentinelEl = null;
+  }
+  if (releasedTop.length) {
+    if (!topSentinelEl) { topSentinelEl = makeSentinel(); topObserver.observe(topSentinelEl); }
+    tracksBox.insertBefore(topSentinelEl, tracksBox.firstChild);
+  } else if (topSentinelEl) {
+    topObserver.unobserve(topSentinelEl);
+    topSentinelEl.remove(); topSentinelEl = null;
+  }
+}
+
+function removeCardByEl(el) {
+  if (!el) return;
+  const g = groups.find(gr => gr.el === el);
+  if (g) { removeDiffGroupQuietly(g.id); return; }
+  const t = tracks.find(tr => tr.el === el);
+  if (t) removeTrackQuietly(t.id);
+}
+function shouldPin(d) {
+  const el = d._el;
+  if (!el) return true;
+  const g = groups.find(gr => gr.el === el);
+  if (g) {
+    return g.trackIds.some(id => {
+      const t = tracks.find(tr => tr.id === id);
+      return t && (t.playing || t.analysisResults);
+    });
+  }
+  const t = tracks.find(tr => tr.el === el);
+  return t ? (t.playing || t.analysisResults) : true;
+}
+function fixActiveTrack() {
+  if (activeTrackId && !tracks.some(t => t.id === activeTrackId)) activeTrackId = null;
+}
+function recycleTop() {
+  while (renderedCards.length > MAX_RENDERED) {
+    const d = renderedCards.shift();
+    if (!d._el) continue;
+    if (shouldPin(d)) { renderedCards.unshift(d); break; }
+    removeCardByEl(d._el);
+    d._el = null;
+    releasedTop.push(d);
+  }
+  fixActiveTrack();
+}
+function renderWindow(count) {
+  if (count <= 0 || !pendingCards.length) { updateSentinels(); return; }
+  const batch = pendingCards.splice(0, count);
+  const els = applyGrouped(batch);
+  for (let i = 0; i < batch.length; i++) {
+    batch[i]._el = (els && els[i]) || null;
+    renderedCards.push(batch[i]);
+  }
+  recycleTop();
+  updateSentinels();
+  refreshUI();
+}
+function restoreTop(count) {
+  if (count <= 0 || !releasedTop.length) { updateSentinels(); return; }
+  let restored = 0;
+  while (restored < count && releasedTop.length) {
+    restored++;
+    const d = releasedTop.pop();
+    const anchor = renderedCards.length ? (renderedCards[0]._el || null) : null;
+    const els = applyGrouped([d]);
+    d._el = (els && els[0]) || null;
+    renderedCards.unshift(d);
+    if (d._el && anchor && anchor.parentNode === tracksBox && d._el !== anchor) {
+      tracksBox.insertBefore(d._el, anchor);
+    }
+  }
+  /* keep the window bounded: overflow from the bottom is re-queued */
+  while (renderedCards.length > MAX_RENDERED) {
+    const d = renderedCards.pop();
+    if (d._el) { removeCardByEl(d._el); d._el = null; }
+    pendingCards.unshift(d);
+  }
+  fixActiveTrack();
+  updateSentinels();
+  refreshUI();
+}
+
+/* ========================================================================
+ *  OFF-THREAD PROCESSING
+ *
+ *  index.html is intentionally a single portable file (works on any OS and
+ *  directly from file://), so the spectrogram helper below is spawned as a
+ *  Blob worker built from the source of an inline function. Everything falls
+ *  back to the classic synchronous code path if workers or WASM are
+ *  unavailable.
+ *
+ *  Spectrogram worker — runs the STFT off the main thread.  Its core FFT
+ *  is an embedded WASM SIMD module (built from tools/fft.c; the base64
+ *  artifact is committed, see SPEC_WASM_B64) which is ~6x faster than the
+ *  hand-rolled JS FFT.  Without WASM the main thread computes specs inline
+ *  exactly as before.
+ * ======================================================================== */
+
+/* Embedded WASM SIMD FFT module — regenerate via tools/build-fft.sh.
+   Kept out of specWorkerMain() so the worker source stays small. */
+const SPEC_WASM_B64 = "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";
+
+/* Build a Blob worker from the source of a self-contained function, with an
+   optional prelude (e.g. constants) injected before the function body. */
+function makeBlobWorker(fn, prelude) {
+  const src = (prelude ? prelude + '\n' : '') + '(' + fn.toString() + ')();';
+  const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  const w = new Worker(url);
+  return w;
+}
+
+/* ---- spectrogram worker main -------------------------------------------
+   Self-contained (no outer-scope references).  Mirrors computeSpec() in the
+   main thread but batches four FFT frames into one WASM SIMD call. */
+function specWorkerMain() {
+  'use strict';
+  const FFT_SIZE = 2048, HOP_DIV = 4, MAX_FRAMES = 12000, NLANES = 4;
+
+  const HANN = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) HANN[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (FFT_SIZE - 1)));
+
+  const DB_F32 = new Float32Array(1);
+  const DB_U32 = new Uint32Array(DB_F32.buffer);
+  const DB_2 = 10 * Math.log10(2);
+  const DB_MANT = new Float32Array(1025);
+  for (let i = 0; i < 1024; i++) DB_MANT[i] = 10 * Math.log10(1 + i / 1024);
+  DB_MANT[1024] = DB_2;
+  function powToDb(p) {
+    if (p <= 0) return -140;
+    DB_F32[0] = p;
+    const bits = DB_U32[0];
+    const e = (bits >>> 23) & 0xff;
+    if (e === 0) return -140;
+    const m = bits & 0x7fffff;
+    const idx = m >>> 13;
+    const frac = (m & 0x1fff) / 8192;
+    return (e - 127) * DB_2 + DB_MANT[idx] + (DB_MANT[idx + 1] - DB_MANT[idx]) * frac;
+  }
+
+  let wasmInit = null;
+  let dre = null, dim = null, fftFn = null;
+  function ensureWasm() {
+    if (!wasmInit) {
+      wasmInit = (async () => {
+        try {
+          if (typeof __WASM_B64 !== 'string') return false;
+          const bin = Uint8Array.from(atob(__WASM_B64), c => c.charCodeAt(0));
+          const { instance } = await WebAssembly.instantiate(bin, { env: { cos: Math.cos, sin: Math.sin } });
+          instance.exports.init();
+          dre = new Float32Array(instance.exports.memory.buffer, instance.exports.get_dre(), FFT_SIZE * NLANES);
+          dim = new Float32Array(instance.exports.memory.buffer, instance.exports.get_dim(), FFT_SIZE * NLANES);
+          fftFn = instance.exports.fft;
+          return true;
+        } catch (e) {
+          console.warn('SpecView: WASM FFT unavailable, using main-thread fallback.', e);
+          return false;
+        }
+      })();
+    }
+    return wasmInit;
+  }
+
+  function computeSpecTask(raw, sr, H, maxBin) {
+    const nS = raw.length;
+    let hop = FFT_SIZE / HOP_DIV;
+    let nF = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+    if (nF > MAX_FRAMES) {
+      hop = Math.max(1, Math.ceil((nS - FFT_SIZE) / (MAX_FRAMES - 1)));
+      nF = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+    }
+    const colDb = new Float32Array(nF * H);
+    const rowBin = new Float32Array(H);
+    for (let y = 0; y < H; y++) rowBin[y] = (1 - y / (H - 1)) * maxBin;
+    const dbA = new Float32Array(maxBin + 2), dbB = new Float32Array(maxBin + 2);
+    const totalPairs = (nF + 1) >> 1;
+
+    const writeCol = (dbArr, f) => {
+      if (f >= nF) return;
+      const base = f * H;
+      for (let y = 0; y < H; y++) {
+        const fb = rowBin[y]; const b0 = fb | 0; const t = fb - b0;
+        const b1 = b0 < maxBin ? b0 + 1 : b0;
+        colDb[base + y] = dbArr[b0] + (dbArr[b1] - dbArr[b0]) * t;
+      }
+    };
+    const unpack = (l) => {
+      for (let k = 0; k <= maxBin; k++) {
+        const nk = (FFT_SIZE - k) & (FFT_SIZE - 1);
+        const x0 = dre[k * NLANES + l], y0 = dim[k * NLANES + l];
+        const x1 = dre[nk * NLANES + l], y1 = dim[nk * NLANES + l];
+        const rA = x0 + x1, iA = y0 - y1;   /* 2·A[k]  */
+        const rB = y0 + y1, iB = x1 - x0;   /* 2·B[k]  */
+        dbA[k] = powToDb((rA * rA + iA * iA) * 0.25);
+        dbB[k] = powToDb((rB * rB + iB * iB) * 0.25);
+      }
+    };
+
+    for (let p0 = 0; p0 < totalPairs; p0 += NLANES) {
+      const lanes = Math.min(NLANES, totalPairs - p0);
+      for (let i = 0; i < FFT_SIZE; i++)
+        for (let l = lanes; l < NLANES; l++) { dre[i * NLANES + l] = 0; dim[i * NLANES + l] = 0; }
+      for (let l = 0; l < lanes; l++) {
+        const p = p0 + l;
+        const fA = 2 * p, offA = fA * hop;
+        const fB = fA + 1, offB = offA + hop;
+        const hasA = fA < nF, hasB = fB < nF;
+        for (let i = 0; i < FFT_SIZE; i++) {
+          const ia = offA + i, ib = offB + i;
+          dre[i * NLANES + l] = hasA && ia < nS ? raw[ia] * HANN[i] : 0;
+          dim[i * NLANES + l] = hasB && ib < nS ? raw[ib] * HANN[i] : 0;
+        }
+      }
+      fftFn();
+      for (let l = 0; l < lanes; l++) {
+        unpack(l);
+        const p = p0 + l;
+        writeCol(dbA, 2 * p);
+        writeCol(dbB, 2 * p + 1);
+      }
+    }
+    let peak = -Infinity;
+    for (let i = 0; i < colDb.length; i++) if (colDb[i] > peak) peak = colDb[i];
+    return { colDb, nF, hop, maxBin, peak };
+  }
+
+  onmessage = async (ev) => {
+    const m = ev.data || {};
+    if (m.type !== 'spec') return;
+    try {
+      const ok = await ensureWasm();
+      if (!ok) { postMessage({ type: 'error', id: m.id, error: 'nowasm' }); return; }
+      const res = computeSpecTask(m.samples, m.sr, m.H, m.maxBin);
+      postMessage({ type: 'done', id: m.id, H: m.H, colDb: res.colDb, nF: res.nF, hop: res.hop, maxBin: res.maxBin, peak: res.peak },
+        [res.colDb.buffer]);
+    } catch (e) {
+      postMessage({ type: 'error', id: m.id, error: String((e && e.message) || e) });
+    }
+  };
+}
+
+/* ---- main-thread spectrogram worker bridge ------------------------------ */
+let specWorker = null;                 /* Worker | 'fail' | null */
+let specJobSeq = 0;
+let specEngine = 'none';               /* debug: wasm | inline | none */
+const specPending = new Map();         /* id -> { track, resolve } */
+
+function getSpecWorker() {
+  if (specWorker !== null) return specWorker === 'fail' ? null : specWorker;
+  try {
+    specWorker = makeBlobWorker(specWorkerMain, 'const __WASM_B64=' + JSON.stringify(SPEC_WASM_B64) + ';');
+    specWorker.onmessage = (ev) => {
+      const m = ev.data || {};
+      const pend = specPending.get(m.id);
+      if (!pend) return;
+      specPending.delete(m.id);
+      const t = pend.track;
+      if (!isTrackAlive(t)) { pend.resolve(); return; }
+      if (m.type === 'done') {
+        if (!t.specData) {
+          t.specData = m.colDb;
+          t.specFrames = m.nF; t.specHop = m.hop; t.specH = m.H;
+          t.specMaxBin = m.maxBin; t.specGlobalPeak = m.peak;
+          specEngine = 'wasm';
+        }
+      } else {
+        /* worker error / missing WASM → fall back to inline compute */
+        specEngine = 'inline';
+        if (!t.specData) { try { computeSpec(t, m.H || pend.H); } catch (e) { console.error('Spec compute failed:', t.name, e); } }
+      }
+      pend.resolve();
+    };
+    specWorker.onerror = (e) => {
+      console.warn('SpecView: spectrogram worker failed, switching to inline compute.', e);
+      specWorker = 'fail';
+      for (const [id, pend] of specPending) {
+        specPending.delete(id);
+        const t = pend.track;
+        if (isTrackAlive(t)) { try { computeSpec(t, pend.H); } catch (err) {} }
+        pend.resolve();
+      }
+    };
+    return specWorker;
+  } catch (e) {
+    specWorker = 'fail';
+    return null;
+  }
+}
+
+/* Mono copy of a track's samples, safe to transfer into a worker. */
+function monoTransferable(t) {
+  const b = t.buffer;
+  const ch = b.numberOfChannels === 1 ? b.getChannelData(0) : mixDown(b);
+  const out = new Float32Array(ch.length);
+  out.set(ch);
+  return out;
+}
+
+/* Guarantee track.specData is filled. Uses the worker when available, else
+   the original synchronous computeSpec(). Idempotent per track. */
+function ensureSpec(t) {
+  if (t.specData) return Promise.resolve();
+  if (t._specPromise) return t._specPromise;
+  const H = t.canvas && t.canvas.height ? t.canvas.height : SPEC_H;
+  const w = getSpecWorker();
+  if (!w) {
+    if (t.buffer) computeSpec(t, H);
+    return Promise.resolve();
+  }
+  /* maxBin must match the inline computeSpec(): it caps the display range to
+     the *native* nyquist (track.nyquist, from the file header), NOT sr/2 —
+     decodeAudioData() resamples buffers to the AudioContext rate, which is
+     usually higher than the source sample rate. */
+  const b = t.buffer;
+  const sr = b.sampleRate;
+  const maxBin = Math.min(FFT_SIZE >> 1, Math.ceil(t.nyquist / (sr / FFT_SIZE)));
+  const samples = monoTransferable(t);
+  t._specPromise = new Promise((resolve) => {
+    const id = ++specJobSeq;
+    specPending.set(id, { track: t, H, resolve });
+    w.postMessage({ type: 'spec', id, samples, sr, H, maxBin }, [samples.buffer]);
+  }).finally(() => { t._specPromise = null; });
+  return t._specPromise;
+}
+
+/* Debug/test hook (unused in production). */
+window.__specview = {
+  get specEngine() { return specEngine; },
+  get specWorker() { return specWorker === null ? 'unused' : (specWorker === 'fail' ? 'inline' : 'worker'); },
+  get pendingCards() { return pendingCards.length; },
+  get renderedCards() { return renderedCards.length; },
+  get releasedTop() { return releasedTop.length; },
+  get trackCount() { return tracks.length; },
+  get groupCount() { return groups.length; },
+  get loadedCount() { return tracks.filter(t => t.loaded).length; },
+};
+
+/* Fast RIFF/WAVE PCM decoder → AudioBuffer, avoiding the much slower
+   audioCtx.decodeAudioData() for plain PCM .wav files (common in
+   webdataset/ACAV shards). Returns null for anything else so callers
+   fall back to decodeAudioData. */
+function decodeWavBuffer(arrayBuffer) {
+  const v = new DataView(arrayBuffer);
+  if (v.byteLength < 12) return null;
+  if (v.getUint32(0, true) !== 0x46464952) return null;   /* 'RIFF' */
+  if (v.getUint32(8, true) !== 0x45564157) return null;   /* 'WAVE' */
+
+  let fmt = null, dataOff = -1, dataLen = 0;
+  let off = 12;
+  while (off + 8 <= v.byteLength) {
+    const id = v.getUint32(off, true);
+    const size = v.getUint32(off + 4, true);
+    const body = off + 8;
+    if (id === 0x20746D66) {                              /* 'fmt ' */
+      if (body + 16 <= v.byteLength) {
+        fmt = {
+          format: v.getUint16(body, true),
+          channels: v.getUint16(body + 2, true),
+          sampleRate: v.getUint32(body + 4, true),
+          blockAlign: v.getUint16(body + 12, true),
+          bits: v.getUint16(body + 14, true),
+        };
+      }
+    } else if (id === 0x61746164) {                       /* 'data' */
+      dataOff = body; dataLen = size;
+      break;
+    }
+    if (size === 0) break;
+    off = body + size + (size & 1);
+  }
+  if (!fmt || dataOff < 0 || fmt.channels < 1 || fmt.channels > 32 ||
+      !(fmt.sampleRate > 0) || fmt.blockAlign < 1) return null;
+
+  const isPcm = fmt.format === 1;
+  const isFloat = fmt.format === 3 && fmt.bits === 32;
+  if (!isPcm && !isFloat) return null;
+  const bps = fmt.bits >> 3;
+  if (bps < 1 || fmt.blockAlign !== bps * fmt.channels) return null;
+
+  const usable = Math.min(dataLen, v.byteLength - dataOff);
+  const frames = Math.floor(usable / fmt.blockAlign);
+  if (frames < 1) return null;
+
+  let buf;
+  try { buf = audioCtx.createBuffer(fmt.channels, frames, fmt.sampleRate); }
+  catch (e) { return null; }
+  const stride = fmt.blockAlign;
+
+  if (isFloat) {
+    for (let ch = 0; ch < fmt.channels; ch++) {
+      const d = buf.getChannelData(ch);
+      const base = ch * 4;
+      for (let f = 0; f < frames; f++) d[f] = v.getFloat32(dataOff + f * stride + base, true);
+    }
+  } else if (fmt.bits === 8) {
+    for (let ch = 0; ch < fmt.channels; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let f = 0; f < frames; f++) d[f] = (v.getUint8(dataOff + f * stride + ch) - 128) / 128;
+    }
+  } else if (fmt.bits === 16) {
+    for (let ch = 0; ch < fmt.channels; ch++) {
+      const d = buf.getChannelData(ch);
+      const base = ch * 2;
+      for (let f = 0; f < frames; f++) d[f] = v.getInt16(dataOff + f * stride + base, true) / 32768;
+    }
+  } else if (fmt.bits === 24) {
+    for (let ch = 0; ch < fmt.channels; ch++) {
+      const d = buf.getChannelData(ch);
+      const base = ch * 3;
+      for (let f = 0; f < frames; f++) {
+        const b = dataOff + f * stride + base;
+        let s = v.getUint8(b) | (v.getUint8(b + 1) << 8) | (v.getUint8(b + 2) << 16);
+        if (s & 0x800000) s |= ~0xFFFFFF;
+        d[f] = s / 8388608;
+      }
+    }
+  } else if (fmt.bits === 32) {
+    for (let ch = 0; ch < fmt.channels; ch++) {
+      const d = buf.getChannelData(ch);
+      const base = ch * 4;
+      for (let f = 0; f < frames; f++) d[f] = v.getInt32(dataOff + f * stride + base, true) / 2147483648;
+    }
+  } else {
+    return null;
+  }
+  return buf;
+}
+
+/* Decode audio bytes to an AudioBuffer: fast path for PCM WAVs, otherwise
+   the standard decodeAudioData (handles MP3/OGG/FLAC/…). */
+async function decodeToAudioBuffer(arrayBuffer) {
+  const fast = decodeWavBuffer(arrayBuffer);
+  if (fast) return fast;
+  return audioCtx.decodeAudioData(arrayBuffer.slice(0));
+}
+
+/* Per-card render queue: rasterize at most one finished card per animation
+   frame, so several files completing together don't stall the main thread. */
+const renderQueue = [];
+let renderQueued = false;
+function queueCardRender(job) {
+  renderQueue.push(job);
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(function pump() {
+    const next = renderQueue.shift();
+    if (next) { try { next(); } catch (e) { console.error('Card render error:', e); } }
+    if (renderQueue.length) requestAnimationFrame(pump);
+    else renderQueued = false;
+  });
+}
+
 /* Decode a single lazy track: read file → parse SR → decode → render */
 async function loadTrack(t) {
   if (t.loaded || t._loading || !t.file) return;
@@ -544,7 +1241,7 @@ async function loadTrack(t) {
     if (!isTrackAlive(t)) return;  /* track removed during async gap */
 
     const nativeSR = parseNativeSampleRate(arrBuf) || null;
-    const decoded = await audioCtx.decodeAudioData(arrBuf.slice(0));
+    const decoded = await decodeToAudioBuffer(arrBuf);
     if (!isTrackAlive(t)) return;  /* track removed during async gap */
 
     t.buffer   = decoded;
@@ -566,13 +1263,33 @@ async function loadTrack(t) {
           ? t.wrapper.parentElement.querySelector('.freq-labels')
           : null;
         if (freqEl) { freqEl.innerHTML = ''; addFreqLabels(freqEl, t.nyquist); }
-        renderSpec(t);
-        if (waveformVisible && t.waveformCanvas) drawWaveform(t);
+        /* rasterize on the per-frame queue (ensureSpec off-thread + draw)
+           so bursts of finished decodes don't block the UI */
+        queueCardRender(() => {
+          if (!isTrackAlive(t)) return;
+          ensureSpec(t).then(() => {
+            if (!isTrackAlive(t)) return;
+            paintTrackCanvas(t);
+            const le = t.wrapper ? t.wrapper.querySelector('.loading-overlay') : null;
+            if (le && le.parentNode) le.remove();
+            updateRuler(t);
+            updateCardInfo(t.el);
+          }).catch(() => {
+            if (!isTrackAlive(t)) return;
+            const le = t.wrapper ? t.wrapper.querySelector('.loading-overlay') : null;
+            if (le && le.parentNode) le.remove();
+          });
+        });
+      } else {
+        if (loadingEl && loadingEl.parentNode) loadingEl.remove();
+        updateRuler(t);
+        updateCardInfo(t.el);
       }
+    } else {
+      if (loadingEl && loadingEl.parentNode) loadingEl.remove();
+      updateRuler(t);
+      updateCardInfo(t.el);
     }
-    if (loadingEl && loadingEl.parentNode) loadingEl.remove();
-    updateRuler(t);
-    updateCardInfo(t.el);
   } catch(e) {
     console.error('Lazy decode error:', t.name, e);
     if (loadingEl) loadingEl.innerHTML = '<span style="color:#e74c3c;font-size:10px">Decode failed</span>';
@@ -614,74 +1331,17 @@ function updateCardInfo(cardEl) {
 
 /* ========================================================================
  *  TAR / TAR.GZ ARCHIVE SUPPORT
- *  Decompresses .tar.gz/.tgz via DecompressionStream, then extracts
- *  audio files using js-untar. Results are fed into the normal pipeline.
+ *  Streams .tar / .tar.gz / .tgz through the native DecompressionStream
+ *  and an incremental tar parser. Extraction is fault-tolerant: truncated
+ *  or corrupt archives still yield every audio file that was fully read,
+ *  and bad/partial entries are skipped instead of failing the whole file.
+ *  (webdataset shards are ordinary tars — only their naming and occasional
+ *  truncation differ.)
  * ======================================================================== */
-const TAR_EXT  = /\.(tar|tar\.gz|tgz)$/i;
-const AUDIO_RE = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
-
-/* Decompress a gzipped ArrayBuffer using the native DecompressionStream API */
-async function decompressGzip(arrayBuffer) {
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('DecompressionStream API not available. Please use a modern browser (Chrome 80+, Firefox 113+, Safari 16.4+).');
-  }
-  const ds = new DecompressionStream('gzip');
-  const writer = ds.writable.getWriter();
-  const reader = ds.readable.getReader();
-  writer.write(new Uint8Array(arrayBuffer));
-  writer.close();
-  const chunks = [];
-  let totalLen = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    totalLen += value.length;
-  }
-  const out = new Uint8Array(totalLen);
-  let off = 0;
-  for (const ch of chunks) { out.set(ch, off); off += ch.length; }
-  return out.buffer;
-}
-
-/* Extract audio files from a .tar or .tar.gz/.tgz archive.
-   Returns an array of File-like objects { name, arrayBuffer(), type } */
-async function extractAudioFromTar(arrayBuffer, fileName) {
-  let tarBuffer = arrayBuffer;
-
-  /* If gzipped, decompress first */
-  if (/\.(tar\.gz|tgz)$/i.test(fileName)) {
-    tarBuffer = await decompressGzip(arrayBuffer);
-  }
-
-  /* Use js-untar to parse the tar */
-  if (typeof window.untar !== 'function') {
-    throw new Error('js-untar library not loaded.');
-  }
-
-  const entries = await window.untar(tarBuffer);
-  const audioFiles = [];
-
-  for (const entry of entries) {
-    /* Skip directories and empty files */
-    if (!entry.name || entry.size === 0 || entry.type === '5') continue;
-
-    /* Use basename for display, keep full path for grouping */
-    const baseName = entry.name.split('/').pop();
-    if (!baseName || !AUDIO_RE.test(baseName)) continue;
-
-    /* Build a File-like object that the existing pipeline can consume.
-       Store the full tar-internal path as _tarPath for same-name grouping. */
-    const blob = entry.blob || new Blob([entry.buffer]);
-    const file = new File([blob], baseName, {
-      type: blob.type || guessAudioMime(baseName)
-    });
-    file._tarPath = entry.name;  /* e.g. "exp1/audio.wav" */
-    audioFiles.push(file);
-  }
-
-  return audioFiles;
-}
+ const TAR_EXT  = /\.(tar|tar\.gz|tgz)$/i;
+ const AUDIO_RE = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
+ const META_RE   = /\.json$/i;
+ const META_MAX  = 1 << 20;   /* skip huge .json payloads (metadata only) */
 
 /* Guess MIME type from extension for audio files */
 function guessAudioMime(name) {
@@ -694,6 +1354,406 @@ function guessAudioMime(name) {
     opus: 'audio/opus'
   };
   return map[ext.toLowerCase()] || 'audio/unknown';
+}
+
+/* Streaming tar reader (shared by the live-display pass and the
+   on-demand per-entry fetcher).
+
+   feed(u8) is called as decompressed bytes arrive; nothing is buffered
+   unless asked for. opts:
+     onAudio(rec)  -> { seq, name, path, size, bytes:Uint8Array|null }
+                      fired once an audio entry's payload has fully passed;
+                      bytes are only present when captureAudio(seq) returned
+                      true for it.
+     onJson(j)     -> { name, path, text } for small .json files (emitJson)
+     captureAudio(seq) -> predicate deciding whether to hold that payload
+     emitJson      -> default true
+   finish() reports what was salvaged. Never throws on malformed data. */
+function createTarReader(opts) {
+  opts = opts || {};
+  const onAudio = opts.onAudio || function(){};
+  const onJson = opts.onJson || function(){};
+  const captureAudio = opts.captureAudio || null;
+  const emitJson = opts.emitJson !== false;
+  const REGULAR = new Set(['0', '\0', '']);
+  const dec = new TextDecoder('utf-8');
+
+  let state = 'header';            /* 'header' | 'payload' */
+  let mode = null;                 /* 'audioCapture' | 'json' | 'meta' | 'skip' */
+  let curName = '';
+  let need = 0;                    /* payload bytes still to advance (512-aligned) */
+  let dataLeft = 0;                /* bytes still to buffer out of payload */
+  let dataParts = null, dataLen = 0;
+  let metaOnDone = null;
+  let pendingLongName = null, pendingPaxPath = null;
+  let pendingAudio = null;         /* audio record waiting for its payload to pass */
+  let seqCount = 0;                /* audio headers seen (seq identity) */
+  let audioEmitted = 0;
+
+  let buf = null, bufLen = 0;
+  let entries = 0;
+  let corrupt = false;
+  let eofSeen = false, eofBlocks = 0;
+
+  function trim(bytes) {
+    let end = bytes.length;
+    while (end > 0 && (bytes[end - 1] === 0 || bytes[end - 1] === 0x20)) end--;
+    return dec.decode(bytes.subarray(0, end));
+  }
+  function isZeroBlock(h) {
+    for (let i = 0; i < 512; i++) if (h[i]) return false;
+    return true;
+  }
+  function checksumValid(h) {
+    let stored = 0, any = false;
+    for (let i = 148; i < 156; i++) {
+      const c = h[i];
+      if (c === 0x20 || c === 0) continue;
+      if (c < 0x30 || c > 0x37) { stored = -1; break; }
+      stored = stored * 8 + (c - 0x30);
+      any = true;
+    }
+    if (!any) stored = 0;
+    if (stored < 0) return false;
+    let sum = 0;
+    for (let i = 0; i < 512; i++) {
+      if (i >= 148 && i < 156) { sum += 0x20; continue; }
+      sum += h[i];
+    }
+    return stored === sum;
+  }
+  function readSize(h) {
+    if (h[124] & 0x80) {
+      let v = h[124] & 0x7f;
+      for (let i = 125; i < 136; i++) v = v * 256 + h[i];
+      return v;
+    }
+    let v = 0, any = false;
+    for (let i = 124; i < 136; i++) {
+      const c = h[i];
+      if (c === 0x20 || c === 0) continue;
+      if (c < 0x30 || c > 0x37) return -1;
+      v = v * 8 + (c - 0x30);
+      any = true;
+    }
+    return any ? v : 0;
+  }
+  function startPayload(m, size, onDone) {
+    mode = m;
+    dataParts = (m === 'skip') ? null : [];
+    dataLen = 0;
+    dataLeft = size;
+    metaOnDone = onDone || null;
+    need = (Math.floor(size / 512) + (size % 512 ? 1 : 0)) * 512;
+    if (need === 0) state = 'header';
+    else state = 'payload';
+  }
+  function readMetaText() {
+    const u8 = partsToBytes();
+    return dec.decode(u8).replace(/\0+$/g, '');
+  }
+  function partsToBytes() {
+    const u8 = new Uint8Array(dataLen);
+    let o = 0;
+    for (const p of dataParts) { u8.set(p, o); o += p.length; }
+    dataParts = null; dataLen = 0;
+    return u8;
+  }
+  function parsePax(text) {
+    const out = {};
+    let p = 0;
+    while (p < text.length) {
+      const sp = text.indexOf(' ', p);
+      if (sp < 0) break;
+      const len = parseInt(text.slice(p, sp), 10);
+      if (!(len > 0) || sp + 1 + (len - (sp - p + 1)) > text.length) break;
+      const body = text.slice(sp + 1, sp + 1 + (len - (sp - p + 1)));
+      const eq = body.indexOf('=');
+      if (eq > 0) out[body.slice(0, eq)] = body.slice(eq + 1).replace(/[\n\r\0]+$/, '');
+      p = sp + 1 + (len - (sp - p + 1));
+    }
+    return out;
+  }
+
+  function handleHeader(h) {
+    const type = String.fromCharCode(h[156]);
+    const size = readSize(h);
+    if (size < 0) { corrupt = true; return false; }
+
+    if (type === 'L') {
+      startPayload('meta', size, () => { pendingLongName = readMetaText(); });
+      return true;
+    }
+    if (type === 'x' || type === 'g') {
+      const isPerFile = type === 'x';
+      startPayload('meta', size, () => {
+        const pax = parsePax(readMetaText());
+        if (isPerFile && pax.path) pendingPaxPath = pax.path;
+      });
+      return true;
+    }
+
+    let name = trim(h.subarray(0, 100));
+    if (pendingLongName !== null) { name = pendingLongName || name; pendingLongName = null; }
+    if (pendingPaxPath !== null) { name = pendingPaxPath || name; pendingPaxPath = null; }
+    const magic = dec.decode(h.subarray(257, 263));
+    if (magic.indexOf('ustar') === 0) {
+      const pfx = trim(h.subarray(345, 500));
+      if (pfx) name = pfx + '/' + name;
+    }
+
+    const base = name.split('/').pop() || '';
+    const isAudio = REGULAR.has(type) && size > 0 && AUDIO_RE.test(base);
+    const isJson  = emitJson && REGULAR.has(type) && size > 0 && size <= META_MAX && META_RE.test(base);
+    if (isAudio) {
+      const seq = seqCount++;
+      pendingAudio = { seq, name, path: name, size };
+      curName = name;
+      const want = !!captureAudio && captureAudio(seq);
+      startPayload(want ? 'audioCapture' : 'skip', size, null);
+    } else if (isJson) {
+      curName = name;
+      startPayload('json', size, null);
+    } else {
+      curName = '';
+      startPayload('skip', size, null);
+    }
+    return true;
+  }
+
+  function consume(n) {
+    const out = buf.subarray(0, n);
+    buf = buf.subarray(n); bufLen -= n;
+    return out;
+  }
+  function resync() {
+    const MAX_SCAN = 8192 * 512;
+    let scanned = 0;
+    while (bufLen >= 512 && scanned < MAX_SCAN) {
+      const h = buf.subarray(0, 512);
+      if (isZeroBlock(h)) return true;
+      if (checksumValid(h)) return true;
+      consume(512);
+      scanned += 512;
+    }
+    return false;
+  }
+
+  function feed(chunk) {
+    if (bufLen === 0) { buf = chunk; bufLen = chunk.length; }
+    else {
+      const merged = new Uint8Array(bufLen + chunk.length);
+      merged.set(buf, 0);
+      merged.set(chunk, bufLen);
+      buf = merged; bufLen = merged.length;
+    }
+
+    while (bufLen > 0 || state === 'header') {
+      if (state === 'header') {
+        if (bufLen < 512) break;
+        const h = buf.subarray(0, 512);
+        if (isZeroBlock(h)) {
+          consume(512);
+          eofBlocks++;
+          if (eofBlocks >= 2) eofSeen = true;
+          continue;
+        }
+        eofBlocks = 0;
+        if (!checksumValid(h)) {
+          if (!resync()) { corrupt = true; return; }
+          continue;
+        }
+        handleHeader(h);
+        consume(512);
+        entries++;
+        if (state !== 'payload') continue;
+      }
+
+      while (state === 'payload' && bufLen > 0 && need > 0) {
+        const m = Math.min(bufLen, need);
+        const copy = Math.min(m, dataLeft);
+        if (copy > 0 && mode !== 'skip') {
+          dataParts.push(buf.subarray(0, copy));
+          dataLen += copy;
+        }
+        consume(m);
+        need -= m;
+        dataLeft -= copy;
+      }
+      if (state !== 'payload') continue;
+      if (need > 0) break;
+
+      /* payload finished */
+      if (mode === 'audioCapture') {
+        const rec = pendingAudio; pendingAudio = null;
+        onAudio({ seq: rec.seq, name: rec.name, path: rec.path, size: rec.size, bytes: partsToBytes() });
+        audioEmitted++;
+      } else if (mode === 'skip' && pendingAudio) {
+        const rec = pendingAudio; pendingAudio = null;
+        onAudio({ seq: rec.seq, name: rec.name, path: rec.path, size: rec.size, bytes: null });
+        audioEmitted++;
+      } else if (mode === 'json') {
+        const text = dec.decode(partsToBytes()).replace(/\0+$/g, '');
+        onJson({ name: curName, path: curName, text });
+      } else if (mode === 'meta' && metaOnDone) {
+        const cb = metaOnDone; metaOnDone = null;
+        cb();
+      }
+      mode = null; curName = '';
+      state = 'header';
+    }
+  }
+
+  function finish() {
+    const midPayload = state === 'payload' && need > 0;
+    const midHeader = state === 'header' && bufLen > 0;
+    return {
+      entries,
+      audioEmitted,
+      truncated: corrupt || midPayload || midHeader,
+      cleanEnd: eofSeen && !corrupt,
+    };
+  }
+
+  return { feed, finish };
+}
+
+const GZ_RE = /\.(tar\.gz|tgz)$/i;
+
+/* Per-archive on-demand reader. Nothing is held in memory — a request for
+   entry seqN decompresses from the last cursor position (restarting only
+   when a request arrives for an entry behind the cursor). */
+function makeArchiveFetcher(file, isGz) {
+  const cache = new Map();             /* seq -> Uint8Array (LRU, most-recent last) */
+  const pending = new Map();           /* seq -> resolve(bytes|null) */
+  let state = null;                    /* { tr, reader } */
+  let curEmitted = 0;
+  let busy = false;
+
+  function cachePut(seq, bytes) {
+    if (cache.has(seq)) cache.delete(seq);
+    cache.set(seq, bytes);
+    while (cache.size > ARCH_LRU_CAP) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+    }
+  }
+
+  async function pump() {
+    if (busy) return;
+    busy = true;
+    try {
+      while (pending.size) {
+        const min = Math.min(...pending.keys());
+        if (state && curEmitted > min) {           /* jumped backwards */
+          try { await state.reader.cancel(); } catch (e) {}
+          state = null;
+          curEmitted = 0;
+        }
+        if (!state) {
+          let src = file.stream();
+          if (isGz) src = src.pipeThrough(new DecompressionStream('gzip'));
+          const reader = src.getReader();
+          const tr = createTarReader({
+            onAudio: r => {
+              curEmitted = r.seq + 1;
+              if (r.bytes) {
+                cachePut(r.seq, r.bytes);
+                if (pending.has(r.seq)) {
+                  const res = pending.get(r.seq);
+                  pending.delete(r.seq);
+                  res(r.bytes);
+                }
+              }
+            },
+            emitJson: false,
+            captureAudio: seq => pending.has(seq)
+          });
+          state = { tr, reader };
+        }
+        const { tr, reader } = state;
+        let finished = false, err = null;
+        while (pending.size && !finished && !err) {
+          let r;
+          try { r = await reader.read(); }
+          catch (e) { err = e; break; }
+          if (r.done) { finished = true; break; }
+          tr.feed(r.value);
+        }
+        if (finished || err) {
+          for (const k of [...pending.keys()]) {
+            const res = pending.get(k);
+            pending.delete(k);
+            res(null);
+          }
+          state = null;
+          curEmitted = 0;
+        }
+      }
+    } finally {
+      busy = false;
+    }
+  }
+
+  return {
+    fetch(seq) {
+      const hit = cache.get(seq);
+      if (hit) return Promise.resolve(hit);
+      return new Promise(res => { pending.set(seq, res); pump(); });
+    },
+    peek(seq) { return cache.get(seq) || null; },
+    prewarm(seq, bytes) { cachePut(seq, bytes); }
+  };
+}
+
+/* A File-like handle for lazy tracks backed by an archive entry. Prewarmed
+   entries (captured during the index pass) resolve immediately from the
+   fetcher's LRU so the first cards can decode while the scan is still in
+   flight; anything not yet prewarmed waits for the index pass to finish so
+   the live decode never races the streaming decompression. */
+function lazyAudioHandle(fetcher, seq, name, readyPromise) {
+  return {
+    name: name || '',
+    arrayBuffer() {
+      const hit = fetcher.peek(seq);
+      if (hit) return Promise.resolve(hit.buffer);
+      const ready = readyPromise || Promise.resolve();
+      return ready.then(async () => {
+        let bytes = null;
+        for (let attempt = 0; attempt < 3 && !bytes; attempt++) {
+          if (attempt) await new Promise(r => setTimeout(r, attempt * 60));
+          bytes = await fetcher.fetch(seq);
+        }
+        if (!bytes) throw new Error('Audio entry unavailable (archive truncated)');
+        return bytes.buffer;
+      });
+    }
+  };
+}
+
+/* Small, non-blocking progress pill (never blocks scrolling). */
+function streamProgEl() {
+  let el = document.getElementById('stream-prog');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'stream-prog';
+    el.className = 'stream-prog';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function streamProgSet(text) {
+  const el = streamProgEl();
+  el.textContent = text;
+  el.classList.add('show');
+}
+function streamProgFlash(text) {
+  streamProgSet(text);
+  setTimeout(() => { const el = document.getElementById('stream-prog'); if (el) el.classList.remove('show'); }, 2600);
+}
+function streamProgHide() {
+  const el = document.getElementById('stream-prog');
+  if (el) el.classList.remove('show');
 }
 
 /* Read all file entries from a dropped directory (top-level only, non-recursive) */
@@ -762,55 +1822,138 @@ async function processDroppedEntries(dataTransfer) {
 }
 
 /* Process dropped items: separate tar archives from regular audio files,
-   extract audio from archives, then feed everything into handleFiles.
-   handleFiles() manages its own batch-loading progress overlay. */
+   stream-extract audio from archives, then feed everything into handleFiles.
+   Truncated/corrupt archives are salvaged: every complete audio entry is
+   kept, and a notice is shown instead of a hard error. */
 async function handleDroppedItems(fileList) {
   const regularFiles = [];
   const tarFiles = [];
+  const jsonFiles = [];
 
   for (const f of fileList) {
     if (TAR_EXT.test(f.name)) {
       tarFiles.push(f);
+    } else if (META_RE.test(f.name)) {
+      jsonFiles.push(f);
     } else {
       regularFiles.push(f);
     }
   }
 
   if (tarFiles.length === 0) {
-    /* No archives — pass through directly */
-    return handleFiles(fileList);
+    /* No archives — pass through directly (json pairs ride along) */
+    return handleFiles(fileList, jsonFiles);
   }
 
-  /* Show extraction progress (tar decompression + parsing phase) */
-  const overlay = document.getElementById('drop-overlay');
-  const overlayText = overlay.querySelector('.drop-overlay-text');
-  overlay.classList.add('visible');
-  overlayText.textContent = 'Extracting audio from archive...';
+  /* --- streaming, non-blocking archive loading --------------------------
+     The index pass builds a lightweight list of entries (name/path/seq only)
+     — no audio payload is retained. Cards are then materialized on demand:
+     the first INITIAL_RENDER cards appear as soon as they are indexed, the
+     rest wait for the scroll sentinel, and each card decodes on demand. */
+  const metaMap = new Map();              /* key -> .json text (kept, small) */
+  const notices = [];
+  const STREAM_BATCH = 40;
+  let queue = [];                         /* lightweight indexed items awaiting flush */
 
-  try {
-    for (const tf of tarFiles) {
-      try {
-        overlayText.textContent = 'Extracting: ' + tf.name + '...';
-        const arrBuf = await tf.arrayBuffer();
-        const extracted = await extractAudioFromTar(arrBuf, tf.name);
-        console.log('Extracted', extracted.length, 'audio files from', tf.name);
-        for (const f of extracted) regularFiles.push(f);
-      } catch (e) {
-        console.error('Failed to extract tar:', tf.name, e);
-        overlayText.textContent = 'Error extracting ' + tf.name + ': ' + (e.message || e);
-        await new Promise(r => setTimeout(r, 1500));
+  const flushIndex = () => {
+    if (!queue.length) return;
+    const grouped = groupByBaseName(queue);
+    queue = [];
+    for (const g of grouped) pendingCards.push(g);
+    renderWindow(INITIAL_RENDER - renderedCards.length);
+    updateSentinels();
+  };
+
+  const attachMetas = () => {
+    let changed = false;
+    for (const t of tracks) {
+      if (t.meta) continue;
+      const m = metaMap.get(metaKeyOf(t.name, t.filePath || null));
+      if (m && m !== t.meta) { t.meta = m; changed = true; }
+    }
+    for (const d of pendingCards) {
+      for (const it of d.items) {
+        if (it.meta) continue;
+        const m = metaMap.get(metaKeyOf(it.name, it.filePath || null));
+        if (m) it.meta = m;
       }
     }
-  } finally {
-    /* Hide the extraction overlay — handleFiles creates placeholder cards
-       instantly (lazy) or decodes eagerly for small sets. */
-    overlay.classList.remove('visible');
-    overlayText.textContent = 'Drop audio files, folders, or archives anywhere';
+    if (changed) refreshAllMetaBodies();
+  };
+
+  let shown = 0;
+  let lastProg = 0;
+  for (const tf of tarFiles) {
+    const isGz = GZ_RE.test(tf.name);
+    if (isGz && typeof DecompressionStream === 'undefined') {
+      notices.push('DecompressionStream not supported in this browser — skipped ' + tf.name);
+      continue;
+    }
+    const fetcher = makeArchiveFetcher(tf, isGz);
+    let resolveReady;
+    const readyPromise = new Promise(res => { resolveReady = res; });
+
+    const tr = createTarReader({
+      onAudio: rec => {
+        if (rec.bytes) fetcher.prewarm(rec.seq, rec.bytes);  /* warm the first entries */
+        const handle = lazyAudioHandle(fetcher, rec.seq, rec.name, readyPromise);
+        queue.push({
+          name: rec.name, buffer: null, nativeSR: null, file: handle, filePath: rec.path,
+          meta: metaMap.get(metaKeyOf(rec.name, rec.path)) || null
+        });
+        shown++;
+      },
+      onJson: j => { metaMap.set(metaKeyOf(j.name, j.path), j.text); },
+      captureAudio: seq => seq < ARCH_PREWARM
+    });
+
+    let src = tf.stream();
+    if (isGz) src = src.pipeThrough(new DecompressionStream('gzip'));
+    const reader = src.getReader();
+    let streamError = null;
+    try {
+      for (;;) {
+        let r;
+        try { r = await reader.read(); }
+        catch (e) { streamError = e; break; }
+        if (r.done) break;
+        tr.feed(r.value);
+        /* Flush eagerly while the first cards haven't rendered yet (so the
+           initial spectrograms appear after just a few entries), then settle
+           into larger batches for grouping quality. */
+        const flushThreshold = renderedCards.length < INITIAL_RENDER ? INITIAL_RENDER : STREAM_BATCH;
+        if (queue.length >= flushThreshold) {
+          flushIndex();
+          const now = performance.now();
+          if (now - lastProg > 120) {
+            lastProg = now;
+            streamProgSet('Indexed ' + shown + ' tracks…');
+          }
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch (e) {}
+    }
+    flushIndex();
+    resolveReady();            /* indexing pass done — allow on-demand decodes */
+
+    const st = tr.finish();
+    const truncated = st.truncated || !!streamError;
+    if (truncated) {
+      notices.push(shown
+        ? 'Archive ' + tf.name + ' — loaded ' + shown + ' tracks, then truncated'
+        : 'No audio recovered from ' + tf.name + ' (truncated/corrupt)');
+    }
+    streamProgSet('Loaded ' + shown + ' tracks from ' + tf.name);
+    await new Promise(r => setTimeout(r, 30));
   }
 
-  if (regularFiles.length > 0) {
-    await handleFiles(regularFiles);
-  }
+  attachMetas();
+  if (regularFiles.length) await handleFiles(regularFiles, jsonFiles);
+  streamProgHide();
+  if (notices.length) streamProgFlash(notices.join('  ·  '));
+  updateSentinels();
+  refreshUI();
 }
 
 /* ========================================================================
@@ -849,7 +1992,39 @@ function parseNativeSampleRate(arrayBuffer) {
   return null;
 }
 
-async function handleFiles(fileList) {
+/* ========================================================================
+ *  PAIRED JSON METADATA
+ *  A .json next to an audio file (same folder + basename) is matched up and
+ *  shown in the right-hand "metadata" panel when enabled.
+ * ======================================================================== */
+function metaKeyOf(name, path) {
+  let dir = '';
+  if (path) {
+    const parts = String(path).replace(/\\/g, '/').split('/');
+    parts.pop();
+    dir = parts.join('/');
+  }
+  return (dir ? dir.toLowerCase() + '/' : '') + String(name).replace(/\.[^.]+$/, '').toLowerCase();
+}
+function metaKeyOfFile(f) { return metaKeyOf(f.name, f._tarPath || null); }
+
+/* Read .json files and return a Map key → text. Oversized files are skipped. */
+async function buildMetaMap(jsonList) {
+  const map = new Map();
+  if (!jsonList || !jsonList.length) return map;
+  const dec = new TextDecoder('utf-8');
+  await Promise.all(jsonList.map(async f => {
+    let text = null;
+    try {
+      if (f.size > (4 << 20)) return;            /* too big to be metadata */
+      text = dec.decode(await f.arrayBuffer());
+    } catch (e) { console.error('Meta read error:', f.name, e); return; }
+    map.set(metaKeyOfFile(f), text);
+  }));
+  return map;
+}
+
+async function handleFiles(fileList, metaFiles) {
   const ext = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
 
   /* Collect audio files only */
@@ -859,17 +2034,21 @@ async function handleFiles(fileList) {
   }
   if (!audioFiles.length) return;
 
-  const DECODE_CONCURRENCY = 3;
+  const meta = await buildMetaMap(metaFiles);
+  const attach = f => meta.get(metaKeyOfFile(f)) || null;
+
+  const DECODE_CONCURRENCY = 6;
   if (audioFiles.length < LAZY_THRESH) {
-    /* ── EAGER PATH: decode in chunks of 3 to limit memory pressure ── */
+    /* ── EAGER PATH: decode in chunks of 6 to limit memory pressure ── */
     const batch = [];
     for (let i = 0; i < audioFiles.length; i += DECODE_CONCURRENCY) {
       const chunk = audioFiles.slice(i, i + DECODE_CONCURRENCY);
       const promises = chunk.map(f =>
         f.arrayBuffer().then(arrBuf => {
           const nativeSR = parseNativeSampleRate(arrBuf) || null;
-        return audioCtx.decodeAudioData(arrBuf.slice(0)).then(decoded => ({
-          name: f.name, buffer: decoded, nativeSR: nativeSR || decoded.sampleRate, filePath: f._tarPath || null
+        return decodeToAudioBuffer(arrBuf).then(decoded => ({
+          name: f.name, buffer: decoded, nativeSR: nativeSR || decoded.sampleRate, filePath: f._tarPath || null,
+          meta: attach(f)
         }));
         }).catch(e => { console.error('Decode error:', f.name, e); return null; })
       );
@@ -881,48 +2060,24 @@ async function handleFiles(fileList) {
     applyGrouped(grouped);
     refreshUI();
   } else {
-    /* ── LAZY PATH: create placeholder cards in batches, decode on scroll ── */
-    const LOAD_MORE_BATCH = 100;
-    const items = audioFiles.map(f => ({ name: f.name, buffer: null, nativeSR: null, file: f, filePath: f._tarPath || null }));
+    /* ── LAZY PATH: windowed placeholder cards, decode on scroll ── */
+    const items = audioFiles.map(f => ({ name: f.name, buffer: null, nativeSR: null, file: f, filePath: f._tarPath || null, meta: attach(f) }));
     const grouped = groupByBaseName(items);
-
-    /* Flatten grouped items for batched creation */
-    const allGrouped = grouped;
-    if (allGrouped.length <= LOAD_MORE_BATCH) {
-      applyGrouped(allGrouped);
-    } else {
-      const firstBatch = allGrouped.slice(0, LOAD_MORE_BATCH);
-      applyGrouped(firstBatch);
-      fileURIsQueue = allGrouped.slice(LOAD_MORE_BATCH);
-      updateLoadMoreBtn();
-    }
+    for (const g of grouped) pendingCards.push(g);
+    renderWindow(INITIAL_RENDER - renderedCards.length);
+    updateSentinels();
     refreshUI();
   }
 }
 
-function loadMoreLazyCards() {
-  const LOAD_MORE_BATCH = 100;
-  const batch = fileURIsQueue.splice(0, LOAD_MORE_BATCH);
-  if (batch.length > 0) applyGrouped(batch);
-  updateLoadMoreBtn();
-  refreshUI();
-}
-
-function updateLoadMoreBtn() {
-  if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
-  if (fileURIsQueue.length > 0) {
-    loadMoreBtn = document.createElement('div');
-    loadMoreBtn.className = 'load-more-bar';
-    loadMoreBtn.innerHTML = '<button class="btn load-more-btn">Load more (' + fileURIsQueue.length + ' groups remaining)</button>';
-    loadMoreBtn.querySelector('.load-more-btn').addEventListener('click', loadMoreLazyCards);
-    tracksBox.appendChild(loadMoreBtn);
-  }
-}
-
 /* Apply grouped items: merge with existing tracks or create new cards.
-   Items may have buffer=null (lazy) — createStandalone/createDiffGroup handle both. */
+   Items may have buffer=null (lazy) — createStandalone/createDiffGroup handle
+   both. Returns the card element created/affected for each input descriptor
+   (or null when an item was merged into an existing card). */
 function applyGrouped(grouped) {
+  const els = [];
   for (const grp of grouped) {
+    let el = null;
     if (grp.items.length >= 2) {
       const existingMatch = findExistingStandaloneByStem(grp.baseName);
       let ph = null;
@@ -931,9 +2086,9 @@ function applyGrouped(grouped) {
         const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
         ph = insertPlaceholderBefore(oldTrack.el);
         removeTrackQuietly(oldTrack.id);
-        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, file: oldTrack.file, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath });
+        grp.items.push({ name: oldTrack.name, buffer: oldTrack.buffer, file: oldTrack.file, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath, meta: oldTrack.meta || null });
       }
-      createDiffGroup(grp.baseName, grp.items);
+      el = createDiffGroup(grp.baseName, grp.items);
       if (ph) placeCardAtPosition(ph);
     } else {
       const newItem = grp.items[0];
@@ -945,21 +2100,23 @@ function applyGrouped(grouped) {
         const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
         const ph = insertPlaceholderBefore(oldTrack.el);
         removeTrackQuietly(oldTrack.id);
-        createDiffGroup(stem, [
-          { name: oldTrack.name, buffer: oldTrack.buffer, file: oldTrack.file, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath },
+        el = createDiffGroup(stem, [
+          { name: oldTrack.name, buffer: oldTrack.buffer, file: oldTrack.file, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath, meta: oldTrack.meta || null },
           { ...newItem, suffix: tag }
         ]);
         placeCardAtPosition(ph);
       } else {
         const existingGroup = findExistingGroupByStem(stem);
         if (existingGroup && tag) {
-          addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
+          el = addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
         } else {
-          createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.file, newItem.filePath);
+          el = createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.file, newItem.filePath, newItem.meta);
         }
       }
     }
+    els.push(el || null);
   }
+  return els;
 }
 
 /* Find a standalone track (not in any group) whose stem matches */
@@ -1000,6 +2157,7 @@ function removeTrackQuietly(id) {
   if (i < 0) return;
   const t = tracks[i];
   if (t.playing) stopSource(t);
+  unwatchPaint(t);
   if (t.el) t.el.remove();
   tracks.splice(i, 1);
   if (activeTrackId === id) activeTrackId = null;
@@ -1013,14 +2171,15 @@ function addToDiffGroup(grp, newItem) {
     if (!t) return null;
     const tag = extractTag(stripExt(t.name)).tag;
     const suffix = tag || (t.filePath ? getParentFolderName(t.filePath) : t.name);
-    return { name: t.name, buffer: t.buffer, file: t.file, suffix, nativeSR: t.nativeSR, filePath: t.filePath };
+    return { name: t.name, buffer: t.buffer, file: t.file, suffix, nativeSR: t.nativeSR, filePath: t.filePath, meta: t.meta || null };
   }).filter(Boolean);
 
   const ph = insertPlaceholderBefore(grp.el);
   removeDiffGroupQuietly(grp.id);
   existingItems.push(newItem);
-  createDiffGroup(grp.baseName, existingItems);
+  const el = createDiffGroup(grp.baseName, existingItems);
   placeCardAtPosition(ph);
+  return el;
 }
 
 function removeDiffGroupQuietly(gid) {
@@ -1029,7 +2188,12 @@ function removeDiffGroupQuietly(gid) {
   const grp = groups[gi];
   for (const tid of grp.trackIds) {
     const ti = tracks.findIndex(t => t.id === tid);
-    if (ti >= 0) { if (tracks[ti].playing) stopSource(tracks[ti]); tracks.splice(ti, 1); }
+    if (ti >= 0) {
+      const t = tracks[ti];
+      if (t.playing) stopSource(t);
+      unwatchPaint(t);
+      tracks.splice(ti, 1);
+    }
   }
   grp.el.remove();
   groups.splice(gi, 1);
@@ -1096,32 +2260,90 @@ function groupByBaseName(items) {
 }
 
 /* ========================================================================
- *  FFT  (Cooley-Tukey)
+ *  SPECTROGRAM — computeSpec (one-time STFT) + drawSpec (fast redraw)
+ *
+ *  The FFT core is an in-place radix-2 DIT using precomputed bit-reversal
+ *  and twiddle tables. Because the input is real and only magnitudes are
+ *  shown, the STFT packs TWO windowed frames into ONE complex FFT and
+ *  recovers both spectra via symmetry — roughly halving the number of
+ *  transforms. Bin levels are converted to dB in the power domain with an
+ *  exponent/mantissa approximation (no Math.log10 per bin).
  * ======================================================================== */
-function fftFwd(re, im, N) {
-  for (let i=1,j=0; i<N; i++) {
-    let b=N>>1; for(;j&b;b>>=1) j^=b; j^=b;
-    if(i<j){ let t=re[i];re[i]=re[j];re[j]=t; t=im[i];im[i]=im[j];im[j]=t; }
+const MIN_VIEW_SPAN = 0.05;
+const ZOOM_FACTOR = 1.25;
+
+/* Precomputed Hann window (FFT_SIZE is fixed at startup) */
+const HANN_WIN = new Float32Array(FFT_SIZE);
+for (let i = 0; i < FFT_SIZE; i++) HANN_WIN[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (FFT_SIZE - 1)));
+
+/* Precomputed FFT tables + shared scratch arrays. computeSpec is fully
+   synchronous (never re-entered), so module-scope buffers are reused
+   across frames and tracks to avoid per-call allocation. */
+const FFT_REV   = new Uint16Array(FFT_SIZE);
+const FFT_ROOTS = new Float64Array(FFT_SIZE * 2);   /* exp(-2πi·k/N) */
+(function() {
+  for (let i = 1, j = 0; i < FFT_SIZE; i++) {
+    let b = FFT_SIZE >> 1;
+    for (; j & b; b >>= 1) j ^= b;
+    j ^= b;
+    FFT_REV[i] = j;
   }
-  for (let len=2; len<=N; len<<=1) {
-    const h=len>>1, ang=-2*Math.PI/len, wR=Math.cos(ang), wI=Math.sin(ang);
-    for (let i=0; i<N; i+=len) {
-      let cR=1,cI=0;
-      for (let j=0; j<h; j++) {
-        const a=i+j, bb=i+j+h;
-        const tR=cR*re[bb]-cI*im[bb], tI=cR*im[bb]+cI*re[bb];
-        re[bb]=re[a]-tR; im[bb]=im[a]-tI; re[a]+=tR; im[a]+=tI;
-        const nr=cR*wR-cI*wI; cI=cR*wI+cI*wR; cR=nr;
+  for (let k = 0; k < FFT_SIZE; k++) {
+    const a = -2 * Math.PI * k / FFT_SIZE;
+    FFT_ROOTS[2 * k] = Math.cos(a);
+    FFT_ROOTS[2 * k + 1] = Math.sin(a);
+  }
+})();
+const FFT_RE = new Float64Array(FFT_SIZE);
+const FFT_IM = new Float64Array(FFT_SIZE);
+
+/* dB from positive power via float exponent + mantissa table (~0.05 dB).
+   powToDb(p) = 10·log10(p), i.e. 20·log10(m) when p = m². */
+const DB_F32 = new Float32Array(1);
+const DB_U32 = new Uint32Array(DB_F32.buffer);
+const DB_2 = 10 * Math.log10(2);
+const DB_MANT = new Float32Array(1025);
+for (let i = 0; i < 1024; i++) DB_MANT[i] = 10 * Math.log10(1 + i / 1024);
+DB_MANT[1024] = DB_2;   /* log10(1 + 1024/1024) = log10(2) */
+function powToDb(p) {
+  if (p <= 0) return -140;
+  DB_F32[0] = p;
+  const bits = DB_U32[0];
+  const e = (bits >>> 23) & 0xff;
+  if (e === 0) return -140;         /* denormal / ~zero */
+  const m = bits & 0x7fffff;
+  const idx = m >>> 13;             /* top 10 mantissa bits */
+  const frac = (m & 0x1fff) / 8192;
+  return (e - 127) * DB_2 + DB_MANT[idx] + (DB_MANT[idx + 1] - DB_MANT[idx]) * frac;
+}
+
+/* In-place complex FFT of length FFT_SIZE using the precomputed tables. */
+function fftFixed(re, im) {
+  for (let i = 1; i < FFT_SIZE; i++) {
+    const j = FFT_REV[i];
+    if (i < j) {
+      let t = re[i]; re[i] = re[j]; re[j] = t;
+      t = im[i]; im[i] = im[j]; im[j] = t;
+    }
+  }
+  for (let len = 2; len <= FFT_SIZE; len <<= 1) {
+    const half = len >> 1;
+    const step = FFT_SIZE / len;
+    for (let i = 0; i < FFT_SIZE; i += len) {
+      let tw = 0;
+      const mid = i + half;
+      for (let q = 0; q < half; q++) {
+        const a = i + q, b = mid + q;
+        const wR = FFT_ROOTS[2 * tw], wI = FFT_ROOTS[2 * tw + 1];
+        const tR = wR * re[b] - wI * im[b];
+        const tI = wR * im[b] + wI * re[b];
+        re[b] = re[a] - tR; im[b] = im[a] - tI;
+        re[a] += tR; im[a] += tI;
+        tw += step;
       }
     }
   }
 }
-
-/* ========================================================================
- *  SPECTROGRAM — computeSpec (one-time STFT) + drawSpec (fast redraw)
- * ======================================================================== */
-const MIN_VIEW_SPAN = 0.05;
-const ZOOM_FACTOR = 1.25;
 
 function computeSpec(track, H) {
   if (!track.buffer) return;
@@ -1129,31 +2351,68 @@ function computeSpec(track, H) {
   const sr = buffer.sampleRate;
   const raw = buffer.numberOfChannels === 1 ? buffer.getChannelData(0) : mixDown(buffer);
   const nS = raw.length;
-  const win = new Float32Array(FFT_SIZE);
-  for (let i = 0; i < FFT_SIZE; i++) win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (FFT_SIZE - 1)));
-  const nBins = (FFT_SIZE >> 1) + 1;
-  const binHz = sr / FFT_SIZE;
-  const maxBin = Math.min(nBins - 1, Math.ceil(nyquist / binHz));
-  const hop = FFT_SIZE / HOP_DIV;
-  const nF = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
-  const re = new Float64Array(FFT_SIZE);
-  const im = new Float64Array(FFT_SIZE);
+  const maxBin = Math.min(FFT_SIZE >> 1, Math.ceil(nyquist / (sr / FFT_SIZE)));
+
+  /* Adaptive hop: keep the frame count bounded for very long files so the
+     cached spectrogram stays small and fast. Unchanged for typical clips. */
+  const MAX_FRAMES = 12000;
+  let hop = FFT_SIZE / HOP_DIV;
+  let nF = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+  if (nF > MAX_FRAMES) {
+    hop = Math.max(1, Math.ceil((nS - FFT_SIZE) / (MAX_FRAMES - 1)));
+    nF = Math.max(1, Math.floor((nS - FFT_SIZE) / hop) + 1);
+  }
+
   const colDb = new Float32Array(nF * H);
   const rowBin = new Float32Array(H);
   for (let y = 0; y < H; y++) rowBin[y] = (1 - y / (H - 1)) * maxBin;
-  for (let c = 0; c < nF; c++) {
-    const off = c * hop;
-    for (let i = 0; i < FFT_SIZE; i++) { const idx = off + i; re[i] = idx < nS ? raw[idx] * win[i] : 0; im[i] = 0; }
-    fftFwd(re, im, FFT_SIZE);
+
+  const re = FFT_RE, im = FFT_IM;
+  const dbA = new Float32Array(maxBin + 2);
+  const dbB = new Float32Array(maxBin + 2);
+  const HALF = FFT_SIZE >> 1;
+
+  /* One complex FFT per two real frames; recover both magnitude-dB spectra */
+  let c = 0;
+  for (; c + 1 < nF; c += 2) {
+    const offA = c * hop, offB = offA + hop;
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const ia = offA + i, ib = offB + i;
+      re[i] = ia < nS ? raw[ia] * HANN_WIN[i] : 0;
+      im[i] = ib < nS ? raw[ib] * HANN_WIN[i] : 0;
+    }
+    fftFixed(re, im);
+    for (let k = 0; k <= maxBin; k++) {
+      const nk = (FFT_SIZE - k) & (FFT_SIZE - 1);
+      const x0 = re[k], y0 = im[k];
+      const x1 = re[nk], y1 = im[nk];
+      const rA = x0 + x1, iA = y0 - y1;       /* 2·A[k] */
+      const rB = y0 + y1, iB = x1 - x0;       /* 2·B[k] */
+      dbA[k] = powToDb((rA * rA + iA * iA) * 0.25);
+      dbB[k] = powToDb((rB * rB + iB * iB) * 0.25);
+    }
     const base = c * H;
     for (let y = 0; y < H; y++) {
-      const fb = rowBin[y]; const b0 = fb | 0; const b1 = b0 < maxBin ? b0 + 1 : b0; const t = fb - b0;
-      const m0 = Math.sqrt(re[b0]*re[b0]+im[b0]*im[b0]);
-      const m1 = Math.sqrt(re[b1]*re[b1]+im[b1]*im[b1]);
-      const mag = m0*(1-t)+m1*t;
-      colDb[base + y] = mag > 1e-12 ? 20 * Math.log10(mag) : -140;
+      const fb = rowBin[y]; const b0 = fb | 0; const t = fb - b0;
+      const b1 = b0 < maxBin ? b0 + 1 : b0;
+      colDb[base + y]     = dbA[b0] + (dbA[b1] - dbA[b0]) * t;
+      colDb[base + H + y] = dbB[b0] + (dbB[b1] - dbB[b0]) * t;
     }
   }
+  if (c < nF) {   /* odd leftover frame: single real-input FFT */
+    const off = c * hop;
+    for (let i = 0; i < FFT_SIZE; i++) { const ia = off + i; re[i] = ia < nS ? raw[ia] * HANN_WIN[i] : 0; im[i] = 0; }
+    fftFixed(re, im);
+    const base = c * H;
+    for (let y = 0; y < H; y++) {
+      const fb = rowBin[y]; const b0 = fb | 0; const t = fb - b0;
+      const b1 = b0 < maxBin ? b0 + 1 : b0;
+      const p0 = re[b0] * re[b0] + im[b0] * im[b0];
+      const p1 = re[b1] * re[b1] + im[b1] * im[b1];
+      colDb[base + y] = powToDb(p0) + (powToDb(p1) - powToDb(p0)) * t;
+    }
+  }
+
   let globalPeak = -Infinity;
   for (let i = 0; i < colDb.length; i++) if (colDb[i] > globalPeak) globalPeak = colDb[i];
   track.specData = colDb; track.specFrames = nF; track.specHop = hop;
@@ -1197,9 +2456,10 @@ function drawSpec(track) {
   ctx.putImageData(img, 0, 0);
 }
 
-function renderSpec(track) {
-  const H = track.canvas ? track.canvas.height : SPEC_H;
-  if (!track.specData) computeSpec(track, H);
+async function renderSpec(track) {
+  if (!track.buffer) return;
+  await ensureSpec(track);
+  if (!isTrackAlive(track)) return;
   drawSpec(track);
 }
 
@@ -1315,12 +2575,16 @@ function setWaveformVisible(visible) {
   waveformVisible = visible;
   for (const t of tracks) {
     if (t.waveformRow) t.waveformRow.style.display = visible ? 'flex' : 'none';
-    if (visible && t.waveformCanvas) {
+    /* only re-rasterize tracks whose canvas backing is currently live;
+       offscreen (released) ones are handled when they scroll back near */
+    if (visible && t.waveformCanvas && t._painted) {
       const w = t.wrapper ? t.wrapper.clientWidth : 0;
       if (w > 0) t.waveformCanvas.width = w;
+      if (t.waveformCanvas._h) t.waveformCanvas.height = t.waveformCanvas._h;
       drawWaveform(t);
     }
   }
+  scheduleGeometry();
 }
 
 /* cmap replaced by pre-baked CMAP_LUT */
@@ -1328,7 +2592,7 @@ function setWaveformVisible(visible) {
 /* ========================================================================
  *  TRACK HELPERS
  * ======================================================================== */
-function mkTrack(name, buffer, nativeSR, file, filePath) {
+function mkTrack(name, buffer, nativeSR, file, filePath, meta) {
   const id = nextId++;
   const loaded = !!buffer;
   const dur       = loaded ? buffer.duration     : 0;
@@ -1337,8 +2601,10 @@ function mkTrack(name, buffer, nativeSR, file, filePath) {
   const ny        = displaySR / 2;
   return {
     id, name, buffer, file: file || null, filePath: filePath || null, loaded,
+    meta: meta || null,
     duration:dur, nyquist:ny, sr:displaySR, nativeSR:displaySR, renderSR,
     canvas:null, wrapper:null, ph:null, laneLabel:null, analysisStrip:null, analyzeBtn:null, rulerEl:null,
+    metaPanel:null,
     playing:false, startTime:0, offset:0, source:null,
     groupId:null, el:null, analysisResults:null,
     viewStart:0, viewEnd:dur,
@@ -1368,13 +2634,14 @@ function buildSpecBody(track, h) {
     '<div class="waveform-labels" style="height:'+wfH+'px"></div>'+
     '<div class="waveform-wrapper" style="flex:1;position:relative;overflow:hidden;cursor:crosshair">'+
     '<canvas height="'+wfH+'"></canvas>'+
-    '<div style="position:absolute;top:0;left:0;width:2px;height:100%;background:#ff3333;pointer-events:none;z-index:10;will-change:transform" class="wf-playhead"></div>'+
+    '<div style="position:absolute;top:0;left:0;width:2px;height:100%;background:#ff3333;pointer-events:none;z-index:10" class="wf-playhead"></div>'+
     '</div>';
   el.appendChild(waveRow);
   track.waveformRow = waveRow;
   track.waveformWrapper = waveRow.querySelector('.waveform-wrapper');
   track.waveformCanvas = waveRow.querySelector('canvas');
   track.waveformPh = waveRow.querySelector('.wf-playhead');
+  track.waveformCanvas._h = wfH;
   addWaveformLabels(waveRow.querySelector('.waveform-labels'), wfH);
 
   /* Spectrogram row */
@@ -1399,6 +2666,8 @@ function buildSpecBody(track, h) {
   track.canvas  = specRow.querySelector('canvas');
   track.wrapper = specRow.querySelector('.spec-wrapper');
   track.ph      = specRow.querySelector('.playhead');
+  track.canvas._h = h;
+  paintByCanvas.set(track.canvas, track);
   addFreqLabels(specRow.querySelector('.freq-labels'), track.nyquist);
   const loading = specRow.querySelector('.loading-overlay');
 
@@ -1477,9 +2746,13 @@ function buildSpecBody(track, h) {
         track.canvas.width = w;
         if (track.waveformCanvas) track.waveformCanvas.width = w;
         setTimeout(() => {
-          renderSpec(track);
-          if (waveformVisible && track.waveformCanvas) drawWaveform(track);
-          if (loading.parentNode) loading.remove();
+          ensureSpec(track).then(() => {
+            if (!isTrackAlive(track)) return;
+            paintTrackCanvas(track);
+            if (loading.parentNode) loading.remove();
+          }).catch(() => {
+            if (loading.parentNode) loading.remove();
+          });
         }, 0);
       } else {
         if (loading.parentNode) loading.remove();
@@ -1526,6 +2799,700 @@ function updateRuler(track) {
 }
 
 /* ========================================================================
+ *  PAIRED JSON — right-hand metadata panel
+ * ======================================================================== */
+const META_SHOW_MAX = 120000;   /* cap displayed JSON length (chars) */
+
+function escMetaText(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+/* escMetaText for use inside double-quoted HTML attributes */
+function escAttr(s) { return escMetaText(s).replace(/"/g, '&quot;'); }
+
+/* Minimal, dependency-free JSON syntax highlighter → HTML (no escaping bugs:
+   raw characters inside strings are emitted as-is but HTML-escaped). */
+function highlightJson(text) {
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  const isNumChar = c => (c >= '0' && c <= '9') || c === '-' || c === '+' || c === '.' || c === 'e' || c === 'E';
+  while (i < n) {
+    const ch = text[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') { out.push(ch); i++; continue; }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === '"') { j++; break; }
+        j++;
+      }
+      const lit = text.slice(i, j);
+      let k = j;
+      while (k < n && (text[k] === ' ' || text[k] === '\t')) k++;
+      const isKey = text[k] === ':';
+      const cls = isKey ? 'jv-key' : 'jv-str';
+      out.push('<span class="' + cls + '">' + escMetaText(lit) + '</span>');
+      i = j;
+      continue;
+    }
+    if (isNumChar(ch)) {
+      let j = i;
+      while (j < n && isNumChar(text[j])) j++;
+      out.push('<span class="jv-num">' + escMetaText(text.slice(i, j)) + '</span>');
+      i = j;
+      continue;
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      let j = i;
+      while (j < n && /[A-Za-z]/.test(text[j])) j++;
+      const word = text.slice(i, j);
+      const cls = word === 'true' || word === 'false' ? 'jv-bool' : (word === 'null' ? 'jv-null' : 'jv-punc');
+      out.push('<span class="' + cls + '">' + word + '</span>');
+      i = j;
+      continue;
+    }
+    if ('{}[],:'.indexOf(ch) >= 0) { out.push('<span class="jv-punc">' + ch + '</span>'); i++; continue; }
+    out.push(escMetaText(ch)); i++;
+  }
+  return out.join('');
+}
+
+/* Pretty-print + highlight a raw json string. Returns HTML (or error markup). */
+function renderJsonMeta(raw) {
+  if (!raw) return '<span class="meta-empty">No JSON</span>';
+  let text, pretty;
+  try {
+    const parsed = JSON.parse(raw);
+    pretty = (parsed !== null && typeof parsed === 'object')
+      ? JSON.stringify(parsed, null, 2)
+      : String(raw);
+  } catch (e) {
+    return '<div class="meta-err">' + escMetaText('Invalid JSON — ' + (e && e.message ? e.message : e)) + '</div>' +
+           '<pre class="meta-raw">' + escMetaText(raw) + '</pre>';
+  }
+  const truncated = pretty.length > META_SHOW_MAX;
+  if (truncated) text = pretty.slice(0, META_SHOW_MAX);
+  else text = pretty;
+  let html = highlightJson(text);
+  if (truncated) {
+    html += '<div class="meta-trunc">… truncated (' + pretty.length.toLocaleString() + ' chars) — metadata only</div>';
+  }
+  return html;
+}
+
+/* Build the DOM for a card's right-hand metadata panel. */
+function buildMetaPanel() {
+  const aside = document.createElement('div');
+  aside.className = 'meta-aside';
+  const head = document.createElement('div');
+  head.className = 'meta-head';
+  head.innerHTML =
+    '<button class="meta-pill" title="Browse all fields across loaded files">fields</button>' +
+    '<span class="meta-head-lbl">JSON metadata</span>' +
+    '<button class="meta-clear" title="Clear field selection (show full JSON)">&times;</button>';
+  head.querySelector('.meta-clear').addEventListener('click', clearMetaSel);
+  head.querySelector('.meta-pill').addEventListener('click', e => {
+    e.stopPropagation();
+    toggleMetaPop(e.currentTarget);
+  });
+  const body = document.createElement('div');
+  body.className = 'meta-body';
+  aside.appendChild(head);
+  aside.appendChild(body);
+  return { aside, body, head };
+}
+
+/* ---- resizable JSON panel ---------------------------------------------
+   The JSON panel width is shared across every card via the --meta-width
+   CSS variable (they all stay in sync). Drag the thin handle to widen /
+   narrow it; double-click to restore the default. Width is remembered. */
+const META_WIDTH_DEFAULT = 300;
+const META_WIDTH_MIN = 180;
+
+function metaWidthNow() {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--meta-width').trim();
+  return v || (META_WIDTH_DEFAULT + 'px');
+}
+function metaResizeStart(e) {
+  if (e.button !== 0) return;
+  const rz = e.currentTarget;
+  const row = rz.closest('.card-row');
+  if (!row) return;
+  e.preventDefault();
+  rz.classList.add('dragging');
+  const onMove = ev => {
+    const rect = row.getBoundingClientRect();
+    const maxW = Math.max(META_WIDTH_MIN, rect.width - 220);  /* keep room for the audio column */
+    const w = Math.max(META_WIDTH_MIN, Math.min(ev.clientX < rect.right ? (rect.right - ev.clientX) : maxW, maxW));
+    document.documentElement.style.setProperty('--meta-width', w + 'px');
+  };
+  const onUp = () => {
+    rz.classList.remove('dragging');
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    try { localStorage.setItem('specview-meta-width', metaWidthNow()); } catch (err) {}
+    sizeAndRedrawLoaded();   /* reflow viewport-near spectrograms to the new width */
+    refreshMetaWindow();
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+function metaResizeReset() {
+  document.documentElement.style.setProperty('--meta-width', '');
+  try { localStorage.removeItem('specview-meta-width'); } catch (err) {}
+  sizeAndRedrawLoaded();
+  refreshMetaWindow();
+}
+function makeMetaResizer() {
+  const rz = document.createElement('div');
+  rz.className = 'meta-resizer';
+  rz.title = 'Drag to resize the JSON panel · double-click to reset to default';
+  rz.addEventListener('pointerdown', metaResizeStart);
+  rz.addEventListener('dblclick', e => { e.stopPropagation(); metaResizeReset(); });
+  return rz;
+}
+
+/* ========================================================================
+ *  JSON METADATA INTERACTION — click JSON keys to multi-select fields.
+ *  While fields are selected every row shows those fields (highlighted);
+ *  click a selected key again (or × / uncheck) to go back to the tree.
+ * ======================================================================== */
+let metaSelPaths = new Set();   /* dotted paths currently selected */
+const META_INLINE_CAP = 220;   /* max chars of an inline value preview */
+
+function safeJsonParse(raw) {
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+function metaLooksJson(s) {
+  const t = String(s).trim();
+  return (t[0] === '{' || t[0] === '[') && t.length < 200000;
+}
+
+/* Flatten a parsed JSON value into dotted paths → leaf values. A single-key
+   root wrapper object (webdataset style {"<id>": …}) is unwrapped, and
+   embedded JSON strings are expanded so nested paths resolve everywhere. */
+function flattenMeta(value, prefix, out, isRoot) {
+  if (value === null || typeof value !== 'object') {
+    if (prefix) out.set(prefix, value);
+    return;
+  }
+  if (isRoot && !Array.isArray(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && value[keys[0]] !== null && typeof value[keys[0]] === 'object' && !Array.isArray(value[keys[0]])) {
+      flattenMeta(value[keys[0]], '', out, false);
+      return;
+    }
+  }
+  for (const k of Object.keys(value)) {
+    const child = value[k];
+    const p = prefix ? prefix + '.' + k : k;
+    if (child !== null && typeof child === 'object' && !Array.isArray(child)) {
+      flattenMeta(child, p, out, false);
+    } else {
+      out.set(p, child);
+      if (child !== null && typeof child === 'string' && metaLooksJson(child)) {
+        const inner = safeJsonParse(child);
+        if (inner) flattenMeta(inner, p, out, false);
+      }
+    }
+  }
+}
+function metaLeafMap(raw) {
+  const v = safeJsonParse(raw);
+  if (!v) return null;
+  const m = new Map();
+  flattenMeta(v, '', m, true);
+  return m;
+}
+const metaLeafCache = new Map();
+function cachedLeafMap(raw) {
+  if (metaLeafCache.has(raw)) return metaLeafCache.get(raw);
+  const m = metaLeafMap(raw);
+  if (metaLeafCache.size > 6000) metaLeafCache.clear();
+  metaLeafCache.set(raw, m);
+  return m;
+}
+
+function unwrapRoot(v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const ks = Object.keys(v);
+    if (ks.length === 1 && v[ks[0]] !== null && typeof v[ks[0]] === 'object' && !Array.isArray(v[ks[0]])) {
+      return v[ks[0]];
+    }
+  }
+  return v;
+}
+
+function invalidMetaHtml(raw) {
+  return '<div class="meta-err">' + escMetaText('Invalid JSON') + '</div>' +
+         '<pre class="meta-raw">' + escMetaText(String(raw).slice(0, META_SHOW_MAX)) + '</pre>';
+}
+function clipText(s, cap) { return s.length > cap ? s.slice(0, cap) + ' …' : s; }
+
+/* Inline scalar / array value, syntax coloured & HTML-escaped.
+   String values are shown without surrounding quotes (colour separates
+   them from keys). */
+function scalarHtml(v) {
+  if (v === null) return '<span class="jv-null">null</span>';
+  if (typeof v === 'string') {
+    return '<span class="jv-str" title="' + escAttr(clipText(v, META_SHOW_MAX)) + '">' + escMetaText(clipText(v, META_INLINE_CAP)) + '</span>';
+  }
+  if (typeof v === 'number') return '<span class="jv-num">' + escMetaText(String(v)) + '</span>';
+  if (typeof v === 'boolean') return '<span class="jv-bool">' + v + '</span>';
+  if (Array.isArray(v)) {
+    if (!v.length) return '<span class="jv-num">[ ]</span>';
+    let inner;
+    try {
+      inner = v.map(el =>
+        (el !== null && typeof el === 'object' && !Array.isArray(el))
+          ? escMetaText(JSON.stringify(el))
+          : scalarHtml(el)
+      ).join(', ');
+    } catch (e) { inner = '…'; }
+    return '<span class="jv-num">[ ' + clipText(inner, META_INLINE_CAP) + ' ]</span>';
+  }
+  return escMetaText(String(v));
+}
+
+const META_INDENT = 14;   /* px indentation per nesting level */
+
+function lineHtml(depth, html) {
+  return '<div class="json-line" style="padding-left:' + (depth * META_INDENT) + 'px">' + html + '</div>';
+}
+
+/* Render a JSON value as a clickable tree. Keys are clickable when they
+   hold a selectable value: scalars, arrays, and JSON strings (like ACAV's
+   "caption") — the latter are shown expanded so subfields are clickable
+   too, while the parent key itself still selects the whole value. */
+function treePush(value, prefix, depth, out) {
+  if (value === null || typeof value !== 'object') { out.push(lineHtml(depth, scalarHtml(value))); return; }
+  if (Array.isArray(value)) { out.push(lineHtml(depth, scalarHtml(value))); return; }
+  const keys = Object.keys(value);
+  if (!keys.length) { if (depth > 0) out.push(lineHtml(depth, '<span class="jv-punc">{ }</span>')); return; }
+  if (depth > 0) out.push(lineHtml(depth, '<span class="jv-punc">{</span>'));
+  for (const k of keys) {
+    const child = value[k];
+    const expanded = (typeof child === 'string' && metaLooksJson(child)) ? safeJsonParse(child) : null;
+    const shown = expanded || child;
+    const p = prefix ? prefix + '.' + k : k;
+    const isObjectChild = shown !== null && typeof shown === 'object' && !Array.isArray(shown);
+    /* selectable: scalars/arrays always; JSON-string parents also carry a
+       whole-value entry in the flattened map; pure nested objects only via
+       their children */
+    const selectable = !!expanded || !isObjectChild;
+    const sel = metaSelPaths.has(p);
+    const label = escMetaText(k);
+    let keyTok;
+    if (selectable) {
+      const cls = 'jv-key js-meta-key' + (sel ? ' meta-key-on' : '');
+      const tip = sel ? 'Remove “' + p + '”' : 'Show field “' + p + '” on every row';
+      keyTok = '<span class="' + cls + '" data-path="' + escAttr(p) + '" title="' + escAttr(tip) + '">' + label + '</span>';
+    } else {
+      keyTok = '<span class="jv-key">' + label + '</span>';
+    }
+    const head = keyTok + '<span class="jv-punc">:</span>';
+    if (isObjectChild) {
+      out.push(lineHtml(depth, head));
+      treePush(shown, p, depth + 1, out);
+    } else {
+      out.push(lineHtml(depth, head + ' ' + scalarHtml(shown)));
+    }
+  }
+  if (depth > 0) out.push(lineHtml(depth, '<span class="jv-punc">}</span>'));
+}
+
+function renderJsonTree(raw) {
+  const v = safeJsonParse(raw);
+  if (v === null || v === undefined) return invalidMetaHtml(raw);
+  const out = [];
+  treePush(unwrapRoot(v), '', 0, out);
+  return out.join('');
+}
+/* Cache rendered tree HTML per raw string — with hundreds of cards, a field
+   toggle must never rebuild every panel's full tree. */
+const metaTreeCache = new Map();
+function cachedTreeHtml(raw) {
+  let h = metaTreeCache.get(raw);
+  if (h === undefined) {
+    h = renderJsonTree(raw);
+    if (metaTreeCache.size > 8000) metaTreeCache.clear();
+    metaTreeCache.set(raw, h);
+  }
+  return h;
+}
+
+function prettyJsonText(v) {
+  try { return JSON.stringify(v, null, 2); } catch (e) { return String(v); }
+}
+function jsonHighlightText(t) {
+  const truncated = t.length > META_SHOW_MAX;
+  let html = highlightJson(truncated ? t.slice(0, META_SHOW_MAX) : t);
+  if (truncated) html += '<div class="meta-trunc">… truncated (' + t.length.toLocaleString() + ' chars)</div>';
+  return html;
+}
+
+/* One selected field's value — JSON-looking values are pretty + highlighted;
+   plain strings are shown without surrounding quotes. */
+function metaValueHtml(v) {
+  if (typeof v === 'string') {
+    if (metaLooksJson(v)) {
+      const pv = safeJsonParse(v);
+      if (pv !== null && pv !== undefined) return jsonHighlightText(prettyJsonText(pv));
+    }
+    return '<span class="jv-str">' + escMetaText(v) + '</span>';
+  }
+  if (v === null) return '<span class="jv-null">null</span>';
+  if (typeof v === 'number') return '<span class="jv-num">' + escMetaText(String(v)) + '</span>';
+  if (typeof v === 'boolean') return '<span class="jv-bool">' + v + '</span>';
+  if (typeof v === 'object') return jsonHighlightText(prettyJsonText(v));
+  return escMetaText(String(v));
+}
+
+/* Panel content. While fields are selected we render ONLY the compact
+   field blocks (fast) — no full tree — so clicks stay instant even with
+   hundreds of cards on screen. */
+function metaBodyHtml(raw) {
+  if (!raw) return '<span class="meta-empty">No paired .json file</span>';
+  if (!metaSelPaths.size) return cachedTreeHtml(raw);
+  const m = cachedLeafMap(raw);
+  if (!m) return cachedTreeHtml(raw);
+  const parts = [];
+  for (const p of metaSelPaths) {
+    const label = '<button class="meta-sel-lbl" data-path="' + escAttr(p) + '" title="Click to remove ' + escAttr(p) + '">' + escMetaText(p) + '</button>';
+    if (!m.has(p)) {
+      parts.push('<div class="meta-sel"><div class="meta-sel-head">' + label + '</div><div class="meta-sel-missing">not present in this file</div></div>');
+    } else {
+      parts.push('<div class="meta-sel"><div class="meta-sel-head">' + label + '</div><div class="meta-sel-val">' + metaValueHtml(m.get(p)) + '</div></div>');
+    }
+  }
+  return parts.join('');
+}
+
+/* Fill a panel with a track's JSON (respects the current selection).
+   Skips the DOM write when nothing actually changed. */
+function setMetaBody(bodyEl, meta) {
+  if (!bodyEl) return;
+  const html = metaBodyHtml(meta);
+  if (bodyEl._metaLast === html) return;
+  bodyEl._metaLast = html;
+  bodyEl.innerHTML = html;
+  bodyEl.scrollTop = 0;
+}
+
+function toggleMetaKey(p) {
+  if (metaSelPaths.has(p)) metaSelPaths.delete(p);
+  else metaSelPaths.add(p);
+  refreshAllMetaBodies();
+}
+function removeMetaKey(p) {
+  metaSelPaths.delete(p);
+  refreshAllMetaBodies();
+}
+function clearMetaSel() {
+  metaSelPaths = new Set();
+  refreshAllMetaBodies();
+}
+
+
+function updateMetaHeads() {
+  const n = metaSelPaths.size;
+  const txt = n ? (n + ' field' + (n === 1 ? '' : 's')) : 'JSON metadata';
+  const on = n > 0 && metaVisible;
+  document.body.classList.toggle('meta-sel', on);
+  for (const t of tracks) {
+    if (!t.metaPanel) continue;
+    const lbl = t.metaPanel.head && t.metaPanel.head.querySelector('.meta-head-lbl');
+    if (lbl) lbl.textContent = txt;
+  }
+  for (const g of groups) {
+    if (!g.metaPanel) continue;
+    const lbl = g.metaPanel.head && g.metaPanel.head.querySelector('.meta-head-lbl');
+    if (lbl) lbl.textContent = txt;
+  }
+}
+
+/* ---- field discovery + the in-panel "fields" list overlay ---- */
+function discoverMetaFields() {
+  const counts = new Map();
+  const addMeta = meta => {
+    if (!meta) return;
+    const m = cachedLeafMap(meta);
+    if (!m) return;
+    for (const p of m.keys()) counts.set(p, (counts.get(p) || 0) + 1);
+  };
+  for (const t of tracks) addMeta(t.meta);
+  for (const grp of pendingCards) for (const it of (grp.items || [])) addMeta(it.meta);
+  return Array.from(counts.entries())
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+}
+
+let metaPopEl = null;
+let metaPopOpen = false;
+let metaPopAnchor = null;
+
+function ensureMetaPop() {
+  if (metaPopEl) return metaPopEl;
+  metaPopEl = document.createElement('div');
+  metaPopEl.className = 'meta-pop';
+  metaPopEl.innerHTML =
+    '<div class="mpo-head"><span class="mpo-title">Fields</span>' +
+      '<button class="btn fp-none mpo-clear">Clear</button>' +
+      '<button class="mpo-x" title="Close">&times;</button></div>' +
+    '<input class="mpo-search" type="text" placeholder="Search fields…" autocomplete="off">' +
+    '<div class="mpo-list"></div>' +
+    '<div class="mpo-foot">Check fields to show them on every row. Uncheck all to go back to the full JSON.</div>';
+  document.body.appendChild(metaPopEl);
+
+  const list = metaPopEl.querySelector('.mpo-list');
+  const search = metaPopEl.querySelector('.mpo-search');
+
+  metaPopEl.querySelector('.mpo-x').addEventListener('click', closeMetaPop);
+  metaPopEl.querySelector('.mpo-clear').addEventListener('click', () => { clearMetaSel(); refreshMetaPopChecks(); });
+  metaPopEl.querySelector('.mpo-search').addEventListener('input', () => {
+    const q = search.value.toLowerCase();
+    for (const row of list.querySelectorAll('.mpo-item')) {
+      row.style.display = row.dataset.path.toLowerCase().includes(q) ? '' : 'none';
+    }
+  });
+  list.addEventListener('change', e => {
+    const row = e.target.closest('.mpo-item');
+    if (!row) return;
+    const p = row.dataset.path;
+    if (e.target.checked) metaSelPaths.add(p);
+    else metaSelPaths.delete(p);
+    refreshAllMetaBodies();
+    refreshMetaPopChecks();
+  });
+  document.addEventListener('pointerdown', e => {
+    if (!metaPopOpen) return;
+    if (metaPopEl.contains(e.target)) return;
+    if (metaPopAnchor && metaPopAnchor.contains(e.target)) return;
+    closeMetaPop();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMetaPop(); });
+  return metaPopEl;
+}
+
+function refreshMetaPopChecks() {
+  if (!metaPopEl) return;
+  const list = metaPopEl.querySelector('.mpo-list');
+  for (const row of list.querySelectorAll('.mpo-item')) {
+    row.querySelector('input').checked = metaSelPaths.has(row.dataset.path);
+  }
+}
+
+function buildMetaPopList() {
+  const pop = ensureMetaPop();
+  const list = pop.querySelector('.mpo-list');
+  pop.querySelector('.mpo-search').value = '';
+  const fields = discoverMetaFields();
+  list.innerHTML = fields.length
+    ? fields.map(([p, count]) =>
+        '<label class="mpo-item" data-path="' + escAttr(p) + '">' +
+          '<input type="checkbox">' +
+          '<span class="mpo-name" title="' + escAttr(p) + '">' + escMetaText(p) + '</span>' +
+          '<span class="mpo-count">' + count + '</span>' +
+        '</label>').join('')
+    : '<div class="mpo-empty">No paired JSON found — load audio with .json files first.</div>';
+  refreshMetaPopChecks();
+}
+
+function openMetaPop(anchor) {
+  metaPopAnchor = anchor;
+  buildMetaPopList();
+  const pop = ensureMetaPop();
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = (r.bottom + 6 + window.scrollY) + 'px';
+  pop.style.left = Math.max(8, r.left + r.width - 330) + 'px';
+  pop.classList.add('open');
+  metaPopOpen = true;
+}
+function closeMetaPop() {
+  if (!metaPopEl || !metaPopOpen) return;
+  metaPopEl.classList.remove('open');
+  metaPopOpen = false;
+}
+function toggleMetaPop(anchor) {
+  if (metaPopOpen) closeMetaPop();
+  else openMetaPop(anchor);
+}
+
+function refreshAllMetaBodies() {
+  /* Only rewrite panels near the viewport; far-away ones are marked stale
+     and lazily re-rendered when scrolled to (keeps JSON clicks instant
+     even with hundreds of cards). */
+  metaPanelsMarkStale();
+  refreshMetaWindow();
+  updateMetaHeads();
+}
+
+function metaPanelsMarkStale() {
+  for (const t of tracks) {
+    if (t.metaPanel && t.metaPanel.body) t.metaPanel.body._metaLast = null;
+  }
+  for (const g of groups) {
+    if (g.metaPanel && g.metaPanel.body) g.metaPanel.body._metaLast = null;
+  }
+}
+
+function metaElNearViewport(el) {
+  if (!el) return true;
+  const box = tracksBox;
+  if (!box) return true;
+  const br = box.getBoundingClientRect();
+  const er = el.getBoundingClientRect();
+  return er.bottom >= br.top - 600 && er.top <= br.bottom + 600;
+}
+
+function refreshMetaWindow() {
+  for (const t of tracks) {
+    if (!t.metaPanel || !t.meta) continue;
+    if (metaElNearViewport(t.el)) setMetaBody(t.metaPanel.body, t.meta);
+  }
+  for (const g of groups) {
+    const card = g.el;
+    if (!card || !g.metaPanel) continue;
+    if (!metaElNearViewport(card)) { g.metaPanel.body._metaLast = null; continue; }
+    let active = tracks.find(tr => tr.groupId === g.id && tr.id === activeTrackId);
+    if (!active) active = tracks.find(tr => tr.groupId === g.id);
+    setMetaBody(g.metaPanel.body, active ? active.meta : null);
+  }
+}
+
+function refreshMetaPanels() {
+  /* keep only viewport-near groups in sync (called on lane selection) */
+  for (const g of groups) {
+    const card = g.el;
+    if (!card || !g.metaPanel) continue;
+    if (!metaElNearViewport(card)) { g.metaPanel.body._metaLast = null; continue; }
+    let active = tracks.find(t => t.groupId === g.id && t.id === activeTrackId);
+    if (!active) active = tracks.find(t => t.groupId === g.id);
+    setMetaBody(g.metaPanel.body, active ? active.meta : null);
+  }
+}
+
+/* lazy refresh of JSON panels as the user scrolls */
+let metaScrollRaf = 0;
+function onMetaScroll() {
+  if (metaScrollRaf) return;
+  metaScrollRaf = requestAnimationFrame(() => {
+    metaScrollRaf = 0;
+    showMetaNear();
+    refreshMetaWindow();
+    if (metaVisible) {
+      for (const t of tracks) {
+        if (!t.loaded || !t.wrapper || !t.canvas) continue;
+        if (metaElNearViewport(t.el)) ensureTrackCanvasWidth(t);
+      }
+    }
+  });
+}
+
+/* Reflow already-decoded canvases after the meta panel changes layout width */
+function ensureTrackCanvasWidth(t) {
+  if (!t.loaded || !t.wrapper || !t.canvas) return;
+  const w = t.wrapper.clientWidth;
+  if (w > 0 && t.canvas.width !== w) {
+    t.canvas.width = w;
+    if (t.canvas._h) t.canvas.height = t.canvas._h;
+    if (t.waveformCanvas) {
+      t.waveformCanvas.width = w;
+      if (t.waveformCanvas._h) t.waveformCanvas.height = t.waveformCanvas._h;
+    }
+    if (t.specData) {
+      drawSpec(t);
+      if (waveformVisible && t.waveformCanvas) drawWaveform(t);
+      t._painted = true;
+      if (!t._paintedWatched && t.canvas) { t._paintedWatched = true; paintObserver.observe(t.canvas); }
+    }
+  }
+}
+function sizeAndRedrawLoaded() {
+  /* only viewport-near canvases need reflowing; far ones are fixed on scroll */
+  for (const t of tracks) {
+    if (!t.loaded || !t.wrapper || !t.canvas) continue;
+    if (metaElNearViewport(t.el)) ensureTrackCanvasWidth(t);
+  }
+}
+
+/* ----- geometry: JSON panel is as tall as the spectrogram row -----
+   Constant-based (no layout reads): the spectrogram row is a fixed pixel
+   height and sits below the optional waveform row (single) or below the
+   lane labels (diff group). */
+let grpLabelH = null;
+function groupLabelHeight() {
+  if (grpLabelH === null) {
+    const lbl = document.querySelector('.diff-lane-label');
+    grpLabelH = lbl ? Math.round(lbl.getBoundingClientRect().height) : 26;
+  }
+  return grpLabelH;
+}
+function applyMetaGeometry() {
+  const wfH = waveformVisible ? getWaveformHeight(SPEC_H) : 0;
+  for (const t of tracks) {
+    if (!t.metaPanel) continue;
+    const aside = t.metaPanel.aside;
+    if (!aside || !t.el) continue;
+    aside.style.height = SPEC_H + 'px';
+    aside.style.marginTop = wfH + 'px';
+  }
+  const glh = groupLabelHeight();
+  for (const g of groups) {
+    if (!g.metaPanel) continue;
+    const aside = g.metaPanel.aside;
+    if (!aside || !g.el) continue;
+    aside.style.height = SPEC_H_DIFF + 'px';
+    aside.style.marginTop = glh + 'px';
+  }
+}
+function recomputeMetaGeometry() { applyMetaGeometry(); }
+let geometryRaf = 0;
+function scheduleGeometry() {
+  if (geometryRaf) return;
+  geometryRaf = requestAnimationFrame(() => {
+    geometryRaf = 0;
+    applyMetaGeometry();
+    showMetaNear();
+  });
+}
+
+function setMetaVisible(visible) {
+  metaVisible = visible;
+  if (!visible) closeMetaPop();
+  updateMetaHeads();
+  requestAnimationFrame(() => {
+    if (visible) {
+      applyMetaGeometry();
+      showMetaNear();
+      sizeAndRedrawLoaded();
+      refreshAllMetaBodies();
+    } else {
+      hideMetaAll();
+    }
+  });
+}
+
+/* Only panels near the viewport are actually displayed (sticky) — toggling
+   JSON never forces layout of the whole list. */
+function showMetaNear() {
+  if (!metaVisible) return;
+  for (const t of tracks) {
+    if (!t.metaPanel) continue;
+    const aside = t.metaPanel.aside;
+    if (aside && metaElNearViewport(t.el)) aside.classList.add('show');
+  }
+  for (const g of groups) {
+    if (!g.metaPanel) continue;
+    const aside = g.metaPanel.aside;
+    if (aside && metaElNearViewport(g.el)) aside.classList.add('show');
+  }
+}
+function hideMetaAll() {
+  for (const t of tracks) if (t.metaPanel) t.metaPanel.aside.classList.remove('show');
+  for (const g of groups) if (g.metaPanel) g.metaPanel.aside.classList.remove('show');
+}
+
+/* ========================================================================
  *  SELECT + SEEK
  * ======================================================================== */
 function selectAndSeek(track, time) {
@@ -1550,8 +3517,8 @@ function getSiblings(t) {
 /* ========================================================================
  *  STANDALONE TRACK
  * ======================================================================== */
-function createStandalone(name, buffer, nativeSR, file, filePath) {
-  const t = mkTrack(name, buffer, nativeSR, file, filePath);
+function createStandalone(name, buffer, nativeSR, file, filePath, meta) {
+  const t = mkTrack(name, buffer, nativeSR, file, filePath, meta);
   const infoText = t.loaded
     ? (function(){ const b=buffer; const ch=b.numberOfChannels===1?'Mono':b.numberOfChannels===2?'Stereo':b.numberOfChannels+'ch'; return ch+' '+(t.sr/1000).toFixed(1)+'kHz | '+fmt(t.duration); })()
     : '…';
@@ -1569,8 +3536,24 @@ function createStandalone(name, buffer, nativeSR, file, filePath) {
   hdr.querySelector('.btn-analyze').addEventListener('click', e => { e.stopPropagation(); runAnalysis(t); });
   t.analyzeBtn = hdr.querySelector('.btn-analyze');
   card.appendChild(hdr);
-  card.appendChild(buildSpecBody(t, SPEC_H));
-  card.appendChild(buildRuler(t));
+
+  /* body row: audio (left) + paired JSON metadata (right, toggleable) */
+  const bodyEl = buildSpecBody(t, SPEC_H);
+  const rulerEl = buildRuler(t);
+  const leftCol = document.createElement('div');
+  leftCol.className = 'card-left';
+  leftCol.appendChild(bodyEl);
+  leftCol.appendChild(rulerEl);
+  const panel = buildMetaPanel();
+  setMetaBody(panel.body, t.meta);
+  t.metaPanel = panel;
+  const row = document.createElement('div');
+  row.className = 'card-row';
+  row.appendChild(leftCol);
+  row.appendChild(makeMetaResizer());
+  row.appendChild(panel.aside);
+  card.appendChild(row);
+
   tracksBox.appendChild(card);
   t.el = card;
   tracks.push(t);
@@ -1583,6 +3566,8 @@ function createStandalone(name, buffer, nativeSR, file, filePath) {
     /* lazy: observe for viewport intersection */
     lazyObserver.observe(card);
   }
+  scheduleGeometry();
+  return card;
 }
 
 function removeTrack(id) {
@@ -1591,6 +3576,7 @@ function removeTrack(id) {
   const t = tracks[i];
   if (t.playing) stopSource(t);
   if (t.groupId != null) { removeDiffGroup(t.groupId); return; }
+  unwatchPaint(t);
   if (t.el) t.el.remove();
   tracks.splice(i,1);
   if (activeTrackId===id) activeTrackId = tracks.length ? tracks[0].id : null;
@@ -1626,7 +3612,7 @@ function createDiffGroup(baseName, items) {
   cols.className = 'diff-columns';
 
   items.forEach((item, idx) => {
-    const t = mkTrack(item.name, item.buffer, item.nativeSR, item.file, item.filePath);
+    const t = mkTrack(item.name, item.buffer, item.nativeSR, item.file, item.filePath, item.meta);
     t.groupId = gid;
     const lane = document.createElement('div');
     lane.className = 'diff-lane';
@@ -1659,14 +3645,27 @@ function createDiffGroup(baseName, items) {
     if (!activeTrackId) activeTrackId = t.id;
   });
 
-  card.appendChild(cols);
   const rulerTrack = grpTracks[0];
   const rulerEl = buildRuler(rulerTrack);
-  card.appendChild(rulerEl);
   for (const gt of grpTracks) gt.rulerEl = rulerEl;
+
+  /* body row: diff columns (left) + active-lane JSON metadata (right) */
+  const leftCol = document.createElement('div');
+  leftCol.className = 'card-left';
+  leftCol.appendChild(cols);
+  leftCol.appendChild(rulerEl);
+  const panel = buildMetaPanel();
+  const row = document.createElement('div');
+  row.className = 'card-row';
+  row.appendChild(leftCol);
+  row.appendChild(makeMetaResizer());
+  row.appendChild(panel.aside);
+  card.appendChild(row);
+
   tracksBox.appendChild(card);
-  groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card });
+  groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card, metaPanel: panel });
   updateLaneHighlights();
+  refreshMetaPanels();
 
   if (grpTracks.some(t => t.loaded)) {
     /* render loaded lanes after DOM insertion so wrappers have measured width */
@@ -1680,6 +3679,8 @@ function createDiffGroup(baseName, items) {
     /* lazy: observe for viewport intersection */
     lazyObserver.observe(card);
   }
+  scheduleGeometry();
+  return card;
 }
 
 function removeDiffGroup(gid) {
@@ -1688,7 +3689,11 @@ function removeDiffGroup(gid) {
   const grp = groups[gi];
   for (const tid of grp.trackIds) {
     const ti = tracks.findIndex(t => t.id===tid);
-    if (ti>=0) { if(tracks[ti].playing) stopSource(tracks[ti]); tracks.splice(ti,1); }
+    if (ti>=0) {
+      if(tracks[ti].playing) stopSource(tracks[ti]);
+      unwatchPaint(tracks[ti]);
+      tracks.splice(ti,1);
+    }
   }
   grp.el.remove(); groups.splice(gi,1);
   if (activeTrackId && !tracks.find(t => t.id===activeTrackId))
@@ -1708,10 +3713,10 @@ function deleteTrackFromGroup(trackId) {
     const remainingId = g.trackIds.find(id => id !== t.id);
     const remaining = tracks.find(tr => tr.id === remainingId);
     if (remaining) {
-      const { name, buffer, nativeSR, file, filePath } = remaining;
+      const { name, buffer, nativeSR, file, filePath, meta } = remaining;
       if (remaining.playing) stopSource(remaining);
       removeDiffGroupQuietly(g.id);
-      createStandalone(name, buffer, nativeSR, file, filePath);
+      createStandalone(name, buffer, nativeSR, file, filePath, meta);
     } else { removeDiffGroupQuietly(g.id); }
   } else {
     const baseName = g.baseName;
@@ -1720,11 +3725,11 @@ function deleteTrackFromGroup(trackId) {
       if (!tr) return null;
       const tag = extractTag(stripExt(tr.name)).tag;
       const suffix = tag || (tr.filePath ? getParentFolderName(tr.filePath) : tr.name);
-      return { name: tr.name, buffer: tr.buffer, file: tr.file, suffix, nativeSR: tr.nativeSR, filePath: tr.filePath };
+      return { name: tr.name, buffer: tr.buffer, file: tr.file, suffix, nativeSR: tr.nativeSR, filePath: tr.filePath, meta: tr.meta || null };
     }).filter(Boolean);
     removeDiffGroupQuietly(g.id);
     if (remainingItems.length >= 2) createDiffGroup(baseName, remainingItems);
-    else if (remainingItems.length === 1) { const it = remainingItems[0]; createStandalone(it.name, it.buffer, it.nativeSR, it.file, it.filePath); }
+    else if (remainingItems.length === 1) { const it = remainingItems[0]; createStandalone(it.name, it.buffer, it.nativeSR, it.file, it.filePath, it.meta); }
   }
   const newCard = tracksBox.lastElementChild;
   if (newCard && newCard !== ph && ph.parentNode) tracksBox.insertBefore(newCard, ph);
@@ -1807,13 +3812,15 @@ function addFreqLabels(el, ny) {
  * ======================================================================== */
 function clearAll() {
   stopAll();
+  paintObserver.disconnect();
   tracks.forEach(t => { if(t.el) t.el.remove(); });
   groups.forEach(g => { if(g.el) g.el.remove(); });
   tracks=[]; groups=[]; activeTrackId=null;
   loadQueue.length = 0; activeLoads = 0;
   lazyObserver.disconnect();
-  if (loadMoreBtn) { loadMoreBtn.remove(); loadMoreBtn = null; }
-  fileURIsQueue = [];
+  pendingCards = []; renderedCards = []; releasedTop = [];
+  if (sentinelEl) { sentinelObserver.unobserve(sentinelEl); sentinelEl.remove(); sentinelEl = null; }
+  if (topSentinelEl) { topObserver.unobserve(topSentinelEl); topSentinelEl.remove(); topSentinelEl = null; }
   tracksBox.innerHTML='';
   refreshUI();
 }
@@ -1827,10 +3834,10 @@ function refreshUI() {
   highlightActive(); updateLaneHighlights(); updateTimeDisplay();
 }
 
-function setActive(id) { activeTrackId=id; highlightActive(); updateLaneHighlights(); updateTimeDisplay(); }
+function setActive(id) { activeTrackId=id; highlightActive(); updateLaneHighlights(); updateTimeDisplay(); refreshMetaPanels(); }
 
 function moveToNextCard() {
-  const cards = Array.from(tracksBox.children);
+  const cards = Array.from(tracksBox.children).filter(c => c.className !== 'scroll-sentinel');
   if (!cards.length) return;
   const active = activeTrackId ? tracks.find(t=>t.id===activeTrackId) : tracks[0];
   if (!active || !active.el) { if(tracks.length) setActive(tracks[0].id); return; }
@@ -1841,7 +3848,7 @@ function moveToNextCard() {
   if (firstTrack) { setActive(firstTrack.id); nextCard.scrollIntoView({behavior:'smooth',block:'nearest'}); }
 }
 function moveToPrevCard() {
-  const cards = Array.from(tracksBox.children);
+  const cards = Array.from(tracksBox.children).filter(c => c.className !== 'scroll-sentinel');
   if (!cards.length) return;
   const active = activeTrackId ? tracks.find(t=>t.id===activeTrackId) : tracks[0];
   if (!active || !active.el) { if(tracks.length) setActive(tracks[0].id); return; }
@@ -1968,21 +3975,33 @@ function startAnim() {
 function getPos(t) { return t.playing ? Math.min(t.offset+audioCtx.currentTime-t.startTime,t.duration) : t.offset; }
 
 function updatePlayheads() {
-  for(const t of tracks){
-    if(!t.canvas||!t.ph||!t.loaded) continue;
-    const pos=getPos(t);
+  for (const t of tracks) {
+    if (!t.canvas || !t.ph || !t.loaded) continue;
+    const pos = getPos(t);
     const span = t.viewEnd - t.viewStart;
     if (pos < t.viewStart || pos > t.viewEnd) {
-      t.ph.style.display = 'none';
-      if (t.waveformPh) t.waveformPh.style.display = 'none';
-    } else {
+      if (t._phOn) {
+        t._phOn = false;
+        t.ph.style.display = 'none';
+        if (t.waveformPh) t.waveformPh.style.display = 'none';
+      }
+      continue;
+    }
+    const frac = (pos - t.viewStart) / span;
+    const px = frac * t.wrapper.clientWidth;
+    if (!t._phOn) {
+      t._phOn = true;
       t.ph.style.display = '';
-      const frac = (pos - t.viewStart) / span;
-      const px = frac * t.wrapper.clientWidth;
+      if (t.waveformPh) t.waveformPh.style.display = '';
+    }
+    if (t._phX !== px) {
+      t._phX = px;
       t.ph.style.transform = 'translateX(' + px + 'px)';
-      if (t.waveformPh) {
-        t.waveformPh.style.display = '';
-        const wfPx = t.waveformWrapper ? frac * t.waveformWrapper.clientWidth : px;
+    }
+    if (t.waveformPh) {
+      const wfPx = frac * (t.waveformWrapper ? t.waveformWrapper.clientWidth : t.wrapper.clientWidth);
+      if (t._wfX !== wfPx) {
+        t._wfX = wfPx;
         t.waveformPh.style.transform = 'translateX(' + wfPx + 'px)';
       }
     }
@@ -1990,7 +4009,7 @@ function updatePlayheads() {
 }
 
 function updateTimeDisplay() { const t=getActive(); timeDisp.textContent=t?fmt(getPos(t))+' / '+fmt(t.duration):'0:00.000 / 0:00.000'; }
-function updatePlayBtn(p){ playIcon.innerHTML=p?'&#10074;&#10074;':'&#9654;'; playLabel.textContent=p?'Pause':'Play'; }
+function updatePlayBtn(p){ document.body.classList.toggle('playback', !!p); playIcon.innerHTML=p?'&#10074;&#10074;':'&#9654;'; playLabel.textContent=p?'Pause':'Play'; }
 
 /* ========================================================================
  *  UTIL
@@ -2431,6 +4450,17 @@ btnZoomFit.addEventListener('click', zoomFit);
 btnAnalyzeAll.addEventListener('click', () => { runAnalysisAll(tracks); });
 const chkWaveform = document.getElementById('chk-waveform');
 chkWaveform.addEventListener('change', () => { setWaveformVisible(chkWaveform.checked); });
+const chkMeta = document.getElementById('chk-meta');
+chkMeta.addEventListener('change', () => { setMetaVisible(chkMeta.checked); });
+tracksBox.addEventListener('scroll', onMetaScroll, { passive: true });
+/* click a JSON key → toggle that field on every row; click a selected
+   block's label to remove that field */
+document.addEventListener('click', e => {
+  const lbl = e.target && e.target.closest ? e.target.closest('.meta-sel-lbl') : null;
+  if (lbl && lbl.dataset.path) { removeMetaKey(lbl.dataset.path); return; }
+  const k = e.target && e.target.closest ? e.target.closest('.js-meta-key') : null;
+  if (k && k.dataset.path) toggleMetaKey(k.dataset.path);
+});
 btnClear.addEventListener('click',clearAll);
 
 document.addEventListener('keydown',e=>{
@@ -2451,6 +4481,30 @@ document.addEventListener('keydown',e=>{
   if(e.code==='ArrowRight'&&!e.shiftKey){e.preventDefault();const t=getActive();if(t)seek(getPos(t)+2);}
   if(e.code==='Backspace'){e.preventDefault();const t=getActive();if(t){seek(0);}}
 });
+
+/* Surface otherwise-silent JS errors so problems are visible on screen
+   (e.g. a misbehaving worker or extension) instead of leaving the page
+   quietly degraded. */
+const _errShown = new Set();
+function _surfaceError(tag, err) {
+  try {
+    const msg = String((err && (err.message || err)) || tag).slice(0, 300);
+    if (_errShown.has(msg)) return;
+    _errShown.add(msg);
+    console.error(tag, err);
+    streamProgFlash(tag + ': ' + msg);
+  } catch (e) {}
+}
+window.addEventListener('error', (e) => { _surfaceError('JS error', e.error || e.message); });
+window.addEventListener('unhandledrejection', (e) => { _surfaceError('Promise error', e.reason); });
+
+/* Restore a previously dragged JSON-panel width, if any. */
+(function() {
+  try {
+    const saved = localStorage.getItem('specview-meta-width');
+    if (saved) document.documentElement.style.setProperty('--meta-width', saved);
+  } catch (e) {}
+})();
 
 refreshUI();
 })();
