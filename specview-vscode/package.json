@@ -1,8 +1,8 @@
 {
   "name": "specview",
-  "displayName": "SpecView - Spectrogram Viewer",
-  "description": "Audio spectrogram viewer with playback, auto-grouping for A/B comparison, and ML-powered audio classification",
-  "version": "0.1.4",
+  "displayName": "SpecView - Audio Spectrogram Viewer",
+  "description": "Audio spectrogram viewer for audio analysis: play & compare audio files (WAV/MP3/FLAC/OGG), auto A/B diff grouping, and ML-powered audio classification",
+  "version": "0.2.0",
   "publisher": "sunxingwei",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -31,7 +31,15 @@
     "comparison",
     "diff",
     "playback",
-    "classification"
+    "classification",
+    "audio-analysis",
+    "audio-viewer",
+    "audio-player",
+    "music",
+    "sound",
+    "waveform",
+    "a-b",
+    "onnx"
   ],
   "activationEvents": [
     "onCustomEditor:specview.editor",
@@ -71,7 +79,7 @@
       "explorer/context": [
         {
           "command": "specview.openMultiple",
-          "when": "resourceExtname =~ /\\.(wav|mp3|ogg|flac|m4a|aac|webm|wma|aiff|opus|tar|gz|tgz)$/i",
+          "when": "resourceExtname =~ /\\.(wav|mp3|ogg|flac|m4a|aac|webm|wma|aiff|opus|tar|gz|tgz|json)$/i",
           "group": "navigation"
         },
         {

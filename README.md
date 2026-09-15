@@ -20,6 +20,8 @@ Co-developed across two repositories:
 - **Time Axis Zoom** — Ctrl+wheel zoom, Shift+drag box selection, toolbar +/–/Fit; STFT cached; group sync
 - **Time-Domain Waveform** — toggle via toolbar; amplitude labels; time-aligned with spectrogram
 - **Lazy Loading** — large file sets decode on scroll; windowed card rendering with infinite scroll and DOM recycling (keeps huge archives snappy and lightweight)
+- **Paired JSON Metadata** — `.json` files alongside audio (same stem) shown in a metadata panel with multi-field comparison and a searchable **fields** browser; unpaired `.json` files appear as standalone JSON cards
+- **Multichannel Playback** — stereo/multichannel files (2–8ch) expand to one lane per channel with per-channel **Mute**; all channels are mixed by default and any combination can be muted
 - **ML Audio Classification** — CED-tiny ONNX model (527 AudioSet labels); Analyze All / Group / per-track
 - **Track Management** — Delete key or × button; card position preserved on deletion/merge
 - **Card Navigation** — Up/Down arrow keys with smooth scrolling
@@ -73,7 +75,7 @@ Or visit: https://marketplace.visualstudio.com/items?itemName=sunxingwei.specvie
 cd specview-vscode
 npm install && node esbuild.mjs
 npx @vscode/vsce package
-code --install-extension specview-0.1.2.vsix
+code --install-extension specview-0.2.0.vsix
 ```
 
 ### Additional Extension Features

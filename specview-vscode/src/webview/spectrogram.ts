@@ -1,10 +1,16 @@
-import type { Track } from './types';
+import type { Track, ChannelView } from './types';
 
 export const FFT_SIZE = 2048;
 export const SPEC_H = 220;
 export const SPEC_H_DIFF = 180;
+export const CH_SPEC_H = 150;   // per-channel lane height for multichannel display
 export const HOP_DIV = 4;
 export const DB_RANGE = 90;
+// Absolute full-scale reference in this pipeline's dB units: a full-amplitude
+// sine through a Hann window peaks at ~FFT_SIZE/4, i.e. 20*log10(FFT_SIZE/4).
+// Used so a near-silent file is NOT normalized up to full brightness (which
+// would amplify a few-LSB noise floor into a misleading full-scale spectrogram).
+export const FULL_SCALE_DB = 20 * Math.log10(FFT_SIZE / 4);
 
 const COLORMAP: [number, number, number][] = [
   [0, 0, 0],
@@ -83,14 +89,69 @@ function mixDown(buf: AudioBuffer): Float32Array {
 }
 
 /**
- * Compute full STFT for a track and cache the results.
- * Call this once when the track is first loaded.
+ * The subset of fields the spectrogram/waveform pipeline needs from a lane.
+ * A mono/single-view lane is the Track itself; a channel lane is one entry of
+ * track.chViews. Both expose these same-named fields.
  */
-export function computeSpec(track: Track, H: number): void {
+interface LaneSurface {
+  canvas: HTMLCanvasElement | null;
+  waveformCanvas: HTMLCanvasElement | null;
+  specData: Float32Array | null;
+  specFrames: number;
+  specHop: number;
+  specH: number;
+  specMaxBin: number;
+  specGlobalPeak: number;
+}
+
+/** A computed STFT that can be reused across rebuilds / lane-height changes. */
+interface SpecCacheEntry {
+  specData: Float32Array;
+  specFrames: number;
+  specHop: number;
+  specH: number;
+  specMaxBin: number;
+  specGlobalPeak: number;
+}
+
+/**
+ * Per-buffer spectrogram cache so that toggling grouping (which tears down and
+ * rebuilds tracks) does not recompute the STFT every time. Weakly keyed by the
+ * AudioBuffer: once a buffer is garbage-collected its cache disappears too.
+ * The lane key is -1 for the single (mono/mixdown) view and the channel index
+ * otherwise.
+ */
+const specCache = new WeakMap<AudioBuffer, Map<number, SpecCacheEntry>>();
+
+function specCacheGet(buffer: AudioBuffer, chIndex: number): SpecCacheEntry | null {
+  const byBuf = specCache.get(buffer);
+  if (!byBuf) return null;
+  return byBuf.get(chIndex) ?? null;
+}
+
+function specCacheSet(buffer: AudioBuffer, chIndex: number, entry: SpecCacheEntry): void {
+  let byBuf = specCache.get(buffer);
+  if (!byBuf) { byBuf = new Map(); specCache.set(buffer, byBuf); }
+  byBuf.set(chIndex, entry);
+}
+
+/** Mono samples for a single-view lane, or the samples of one channel. */
+export function rawSamples(track: Track, chIndex: number): Float32Array {
+  const buf = track.buffer;
+  if (chIndex >= 0) return buf.getChannelData(chIndex);
+  return buf.numberOfChannels === 1 ? buf.getChannelData(0) : mixDown(buf);
+}
+
+/** Compute the full STFT for one lane of a track. When `chIndex >= 0` the lane
+ *  is a channel view (raw samples + spec cache from track.chViews[chIndex]);
+ *  otherwise it is the single (mono/mixdown) view stored directly on the track.
+ */
+export function computeSpec(track: Track, H: number, chIndex = -1): void {
+  const lane: LaneSurface = chIndex >= 0 ? track.chViews[chIndex] : track;
   if (!track.buffer) return;
   const { buffer, nyquist } = track;
   const sr = buffer.sampleRate;
-  const raw = buffer.numberOfChannels === 1 ? buffer.getChannelData(0) : mixDown(buffer);
+  const raw = rawSamples(track, chIndex);
   const nS = raw.length;
 
   const win = new Float32Array(FFT_SIZE);
@@ -100,7 +161,7 @@ export function computeSpec(track: Track, H: number): void {
   const binHz = sr / FFT_SIZE;
   const maxBin = Math.min(nBins - 1, Math.ceil(nyquist / binHz));
 
-  const W = track.canvas ? track.canvas.width : 1000;
+  const W = lane.canvas ? lane.canvas.width : 1000;
   const defaultHop = FFT_SIZE / HOP_DIV;
   let hop: number;
   if (nS > FFT_SIZE) {
@@ -141,26 +202,32 @@ export function computeSpec(track: Track, H: number): void {
     }
   }
 
-  // Cache results on the track
+  // Cache results on the lane
   let globalPeak = -Infinity;
   for (let i = 0; i < colDb.length; i++) {
     if (colDb[i] > globalPeak) globalPeak = colDb[i];
   }
-  track.specData = colDb;
-  track.specFrames = nF;
-  track.specHop = hop;
-  track.specH = H;
-  track.specMaxBin = maxBin;
-  track.specGlobalPeak = globalPeak;
+  lane.specData = colDb;
+  lane.specFrames = nF;
+  lane.specHop = hop;
+  lane.specH = H;
+  lane.specMaxBin = maxBin;
+  lane.specGlobalPeak = globalPeak;
+  if (track.buffer) {
+    specCacheSet(track.buffer, chIndex, {
+      specData: colDb, specFrames: nF, specHop: hop, specH: H, specMaxBin: maxBin, specGlobalPeak: globalPeak,
+    });
+  }
 }
 
 /**
- * Draw the visible portion [viewStart, viewEnd] of the cached STFT data to the canvas.
- * Fast operation — no FFT, just pixel mapping from cached data.
+ * Draw the visible portion [viewStart, viewEnd] of the cached STFT data to the
+ * lane canvas. Fast operation — no FFT, just pixel mapping from cached data.
  */
-export function drawSpec(track: Track): void {
+export function drawSpec(track: Track, chIndex = -1): void {
+  const lane: LaneSurface = chIndex >= 0 ? track.chViews[chIndex] : track;
   if (!track.buffer) return;
-  const { canvas, specData, specFrames, specHop, specH } = track;
+  const { canvas, specData, specFrames, specHop, specH } = lane;
   if (!canvas || !specData || !specFrames) return;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -172,10 +239,12 @@ export function drawSpec(track: Track): void {
   const nF = specFrames;
   const hop = specHop;
 
-  // Use global peak for consistent normalization regardless of zoom level
-  // This prevents silent regions from suddenly appearing bright when zoomed in
-  let peak = track.specGlobalPeak;
-  if (peak < -120) peak = -50; // fallback for entirely silent files
+  // Absolute-reference normalization: the scale top is at least full scale
+  // (0 dBFS) rather than the file's own peak, so quiet / near-silent files stay
+  // dark instead of having their noise floor stretched to full brightness.
+  let peak = lane.specGlobalPeak;
+  if (peak < -120) peak = -50; // fallback for entirely silent files (renders black)
+  peak = Math.max(peak, FULL_SCALE_DB);
   const floor = peak - DB_RANGE;
   const invRange = 1 / DB_RANGE;
 
@@ -215,32 +284,54 @@ export function drawSpec(track: Track): void {
 
 /**
  * Full render: compute STFT (if not cached) then draw visible region.
- * Backward-compatible entry point.
+ * Backward-compatible entry point for a single view (mono). For a channel lane
+ * pass chIndex >= 0.
+ *
+ * The computed STFT is cached per buffer+channel. Regrouping/splitting tears
+ * down and rebuilds tracks (which start with no spec data); on such re-renders
+ * the cache is restored so no expensive FFT re-run happens. drawSpec already
+ * re-samples vertically when the target canvas height differs (e.g. a standalone
+ * card at SPEC_H vs a diff-group lane at SPEC_H_DIFF), so a cached spectrum is
+ * reusable across those two layouts.
  */
-export function renderSpec(track: Track): void {
-  const H = track.canvas ? track.canvas.height : SPEC_H;
-  const W = track.canvas ? track.canvas.width : 0;
+export function renderSpec(track: Track, chIndex = -1): void {
+  const lane: LaneSurface = chIndex >= 0 ? track.chViews[chIndex] : track;
+  const H = lane.canvas ? lane.canvas.height : SPEC_H;
+  const W = lane.canvas ? lane.canvas.width : 0;
   if (W === 0) return; // canvas not laid out yet — skip until it has a real width
-  if (!track.specData || track.specH !== H ||
-      (W > 1 && track.specFrames <= 1 && track.buffer && track.buffer.length > FFT_SIZE)) {
-    // Recompute if: no data, height changed (e.g. standalone→diff group), or
-    // only 1 frame was computed due to canvas.width being 0 at compute time.
-    computeSpec(track, H);
+  // Restore cached spectrum (if any) onto the lane before deciding to compute.
+  if (!lane.specData && track.buffer) {
+    const cached = specCacheGet(track.buffer, chIndex);
+    if (cached) {
+      lane.specData = cached.specData;
+      lane.specFrames = cached.specFrames;
+      lane.specHop = cached.specHop;
+      lane.specH = cached.specH;
+      lane.specMaxBin = cached.specMaxBin;
+      lane.specGlobalPeak = cached.specGlobalPeak;
+    }
   }
-  drawSpec(track);
+  if (!lane.specData ||
+      (W > 1 && lane.specFrames <= 1 && track.buffer && track.buffer.length > FFT_SIZE)) {
+    // Recompute if: no cached data, or only 1 frame was cached due to
+    // canvas.width being 0 at compute time.
+    computeSpec(track, H, chIndex);
+  }
+  drawSpec(track, chIndex);
 }
 
 /**
- * Draw time-domain waveform for the visible region [viewStart, viewEnd].
- * Shows amplitude envelope as min/max vertical bars per pixel column.
+ * Draw the time-domain waveform for a lane. When chIndex >= 0 only that channel
+ * is drawn; otherwise the mono mixdown envelope is used (current behavior).
  */
-export function drawWaveform(track: Track): void {
+export function drawWaveform(track: Track, chIndex = -1): void {
+  const lane: LaneSurface = chIndex >= 0 ? track.chViews[chIndex] : track;
   if (!track.buffer) return;
-  const canvas = track.waveformCanvas;
+  const canvas = lane.waveformCanvas;
   if (!canvas) return;
 
-  // Sync canvas width with spectrogram canvas for time alignment
-  const refW = track.canvas ? track.canvas.width : 0;
+  // Sync canvas width with the spectrogram canvas of the same lane
+  const refW = lane.canvas ? lane.canvas.width : 0;
   if (refW > 0 && canvas.width !== refW) {
     canvas.width = refW;
   }
@@ -250,19 +341,8 @@ export function drawWaveform(track: Track): void {
   const W = canvas.width, H = canvas.height;
   if (W === 0 || H === 0) return;
 
-  // Get audio data (mix down to mono)
-  const buf = track.buffer;
-  const raw = buf.numberOfChannels === 1 ? buf.getChannelData(0) : (() => {
-    const out = new Float32Array(buf.getChannelData(0).length);
-    for (let c = 0; c < buf.numberOfChannels; c++) {
-      const ch = buf.getChannelData(c);
-      for (let i = 0; i < ch.length; i++) out[i] += ch[i];
-    }
-    for (let i = 0; i < out.length; i++) out[i] /= buf.numberOfChannels;
-    return out;
-  })();
-
-  const sr = buf.sampleRate;
+  const raw = rawSamples(track, chIndex);
+  const sr = track.buffer.sampleRate;
   const nS = raw.length;
   const startSample = Math.max(0, Math.floor(track.viewStart * sr));
   const endSample = Math.min(nS, Math.ceil(track.viewEnd * sr));
@@ -316,3 +396,12 @@ export function drawWaveform(track: Track): void {
 export function getWaveformHeight(specH: number): number {
   return Math.round(specH / 3);
 }
+
+/** Per-channel spec height — scaled down as channel count grows. */
+export function channelSpecHeight(chCount: number): number {
+  if (chCount <= 2) return SPEC_H;
+  if (chCount <= 4) return CH_SPEC_H;
+  return Math.max(80, Math.round(CH_SPEC_H * 4 / chCount));
+}
+
+export type { ChannelView };

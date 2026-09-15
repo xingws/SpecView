@@ -562,6 +562,11 @@ const SPEC_H      = 220;
 const SPEC_H_DIFF = 180;
 const HOP_DIV     = 4;
 const DB_RANGE    = 90;     // dB dynamic range
+/* Absolute full-scale reference in this pipeline's dB units: a full-amplitude
+   sine through a Hann window peaks at ~FFT_SIZE/4, i.e. 20*log10(FFT_SIZE/4).
+   Used so a near-silent file is NOT normalized up to full brightness (which
+   would amplify a few-LSB noise floor into a misleading full-scale spectrogram). */
+const FULL_SCALE_DB = 20 * Math.log10(FFT_SIZE / 4);
 const LAZY_THRESH = 10;     // ≥ this many files → lazy-load (decode on scroll into view)
 
 /* Windowed/virtualized card rendering: with huge archives we never build all
@@ -2436,6 +2441,9 @@ function drawSpec(track) {
   const visibleFrames = Math.max(1, endFrame - startFrame + 1);
   let peak = track.specGlobalPeak;
   if (peak < -120) peak = -50;
+  /* Absolute-reference top: never normalize a sub-full-scale file up to full
+     brightness, so quiet/near-silent files stay dark (no misleading comb). */
+  peak = Math.max(peak, FULL_SCALE_DB);
   const floor = peak - DB_RANGE;
   const invRange = 1 / DB_RANGE;
   const img = ctx.createImageData(W, H);

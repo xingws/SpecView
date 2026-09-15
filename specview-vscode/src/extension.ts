@@ -25,6 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
         defaultUri: SpecViewEditorProvider.getLastOpenDir(),
         filters: {
           'Audio & Archives': ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'webm', 'wma', 'aiff', 'opus', 'tar', 'tar.gz', 'tgz'],
+          'JSON metadata': ['json'],
         },
       });
       if (files && files.length > 0) {
@@ -71,21 +72,24 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const audioUris = entries
+      const isJson = (name: string): boolean => /\.json$/i.test(name);
+      const isAudio = (name: string): boolean => {
+        const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+        return AUDIO_EXT.includes(ext);
+      };
+
+      const uris = entries
         .filter(([name, type]) => type === vscode.FileType.File)
-        .filter(([name]) => {
-          const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
-          return AUDIO_EXT.includes(ext);
-        })
+        .filter(([name]) => isAudio(name) || isJson(name))
         .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
         .map(([name]) => vscode.Uri.joinPath(folderUri, name));
 
-      if (audioUris.length === 0) {
-        vscode.window.showInformationMessage('No audio files found in folder');
+      if (uris.length === 0) {
+        vscode.window.showInformationMessage('No audio or JSON files found in folder');
         return;
       }
 
-      await SpecViewEditorProvider.openPanel(context, audioUris);
+      await SpecViewEditorProvider.openPanel(context, uris);
     })
   );
 }

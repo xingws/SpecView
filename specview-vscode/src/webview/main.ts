@@ -4,6 +4,7 @@ import {
   getActive, switchLane, getTracks,
   zoomIn, zoomOut, zoomFit, setWaveformVisible, pauseAll,
   moveToNextCard, moveToPrevCard, deleteActiveTrack, handleFileURIs,
+  receiveMetaData, setMetaVisible,
 } from './ui';
 import { getPos } from './audio';
 import { runAnalysisAll } from './analysis';
@@ -23,6 +24,9 @@ initAudio();
 
 // Initialize UI
 initUI();
+
+// Diagnostic for the paired-JSON metadata feature.
+console.log('[specview] meta-feature:', !!document.getElementById('chk-meta'));
 
 // VS Code API
 const vscode = acquireVsCodeApi();
@@ -74,6 +78,8 @@ async function handleMessage(msg: any): Promise<void> {
     await decodeAndAddBatch(msg.files);
   } else if (msg.type === 'fileURIs') {
     handleFileURIs(msg.files);
+  } else if (msg.type === 'metaData') {
+    receiveMetaData(msg.items || []);
   } else if (msg.type === 'error') {
     console.error('Extension error:', msg.message);
   }
@@ -195,6 +201,10 @@ volSlider.addEventListener('input', () => { setVolume(volSlider.valueAsNumber / 
 // Waveform toggle
 const chkWaveform = document.getElementById('chk-waveform') as HTMLInputElement;
 chkWaveform.addEventListener('change', () => { setWaveformVisible(chkWaveform.checked); });
+
+// JSON metadata toggle
+const chkMeta = document.getElementById('chk-meta') as HTMLInputElement;
+if (chkMeta) chkMeta.addEventListener('change', () => { setMetaVisible(chkMeta.checked); });
 
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {

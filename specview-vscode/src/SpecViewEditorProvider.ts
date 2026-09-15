@@ -5,6 +5,8 @@ import { getWebviewHtml } from './webviewHtml';
 
 const ARCHIVE_EXT = /\.(tar|tar\.gz|tgz)$/i;
 const AUDIO_EXT = /\.(mp3|wav|ogg|flac|m4a|aac|webm|wma|aiff|opus)$/i;
+const META_RE = /\.json$/i;
+const META_MAX = 1 << 20;   // skip huge .json payloads (metadata only)
 
 interface TarEntry {
   name: string;
@@ -15,6 +17,7 @@ interface TarEntry {
 interface TarCache {
   buffer: Buffer;
   entries: TarEntry[];
+  jsons: TarEntry[];
 }
 
 function isArchive(name: string): boolean {
@@ -25,6 +28,19 @@ function isAudioFile(name: string): boolean {
   return AUDIO_EXT.test(name);
 }
 
+/** Paired-JSON key: directory (lowercased, with trailing '/') + basename
+ *  without extension (lowercased). Mirrors the web implementation so tar-internal
+ *  and manually-picked .json files match the same audio stems. */
+export function metaKeyOf(name: string, filePath?: string): string {
+  let dir = '';
+  if (filePath) {
+    const parts = String(filePath).replace(/\\/g, '/').split('/');
+    parts.pop();
+    dir = parts.join('/');
+  }
+  return (dir ? dir.toLowerCase() + '/' : '') + String(name).replace(/\.[^.]+$/, '').toLowerCase();
+}
+
 function uint8ToBase64(data: Uint8Array): string {
   return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
 }
@@ -32,6 +48,7 @@ function uint8ToBase64(data: Uint8Array): string {
 /**
  * Decompress if needed and parse tar headers to build an index of audio file entries.
  * Does NOT extract file data — only records offset/size for on-demand extraction.
+ * Also collects small .json entries so they can be paired with same-stem audio.
  */
 async function parseTarIndex(archiveData: Uint8Array, archiveName: string): Promise<TarCache> {
   let tarBuffer: Buffer;
@@ -47,6 +64,7 @@ async function parseTarIndex(archiveData: Uint8Array, archiveName: string): Prom
   }
 
   const entries: TarEntry[] = [];
+  const jsons: TarEntry[] = [];
   let pos = 0;
   while (pos + 512 <= tarBuffer.length) {
     if (tarBuffer[pos] === 0) break;
@@ -55,14 +73,19 @@ async function parseTarIndex(archiveData: Uint8Array, archiveName: string): Prom
     const sizeStr = tarBuffer.toString('utf8', pos + 124, pos + 136).replace(/\0/g, '').trim();
     const fileSize = parseInt(sizeStr, 8) || 0;
     const typeFlag = tarBuffer[pos + 156];
+    const isRegular = typeFlag !== 0x35 && typeFlag !== 53;
     const baseName = fileName.split('/').pop() || fileName;
-    if (typeFlag !== 0x35 && typeFlag !== 53 && fileSize > 0 && isAudioFile(baseName)) {
-      // Store full tar-internal path for unique matching; UI will use basename
-      entries.push({ name: fileName, offset: pos + 512, size: fileSize });
+    if (isRegular && fileSize > 0) {
+      if (isAudioFile(baseName)) {
+        // Store full tar-internal path for unique matching; UI will use basename
+        entries.push({ name: fileName, offset: pos + 512, size: fileSize });
+      } else if (META_RE.test(baseName) && fileSize <= META_MAX) {
+        jsons.push({ name: fileName, offset: pos + 512, size: fileSize });
+      }
     }
     pos += 512 + Math.ceil(fileSize / 512) * 512;
   }
-  return { buffer: tarBuffer, entries };
+  return { buffer: tarBuffer, entries, jsons };
 }
 
 
@@ -168,6 +191,7 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
           defaultUri: this.lastOpenDir ?? vscode.workspace.workspaceFolders?.[0]?.uri,
           filters: {
             'Audio & Archives': ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'webm', 'wma', 'aiff', 'opus', 'tar', 'tar.gz', 'tgz'],
+            'JSON metadata': ['json'],
           },
         });
         if (picked) {
@@ -361,7 +385,32 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
     if (newUris.length === 0) return;
 
     const archiveUris = newUris.filter(uri => isArchive(path.basename(uri.fsPath)));
-    const audioUris = newUris.filter(uri => !isArchive(path.basename(uri.fsPath)));
+    const metaUris = newUris.filter(uri =>
+      !isArchive(path.basename(uri.fsPath)) && /\.json$/i.test(path.basename(uri.fsPath)));
+    const audioUris = newUris.filter(uri =>
+      !isArchive(path.basename(uri.fsPath)) && !/\.json$/i.test(path.basename(uri.fsPath)));
+
+    // Send .json files as metadata (paired by same stem, or standalone JSON card).
+    if (metaUris.length > 0) {
+      const items: { name: string; filePath: string; text: string }[] = [];
+      for (const uri of metaUris) {
+        try {
+          const raw = await vscode.workspace.fs.readFile(uri);
+          if (raw.byteLength > (4 << 20)) continue; // too big for metadata
+          items.push({
+            name: path.basename(uri.fsPath),
+            filePath: uri.fsPath,
+            text: Buffer.from(raw).toString('utf8'),
+          });
+        } catch (e) {
+          console.error('Failed to read JSON:', uri.fsPath, e);
+        }
+      }
+      if (items.length > 0) {
+        webviewPanel.webview.postMessage({ type: 'metaData', items });
+        for (const uri of metaUris) this.loadedFiles.add(uri.fsPath);
+      }
+    }
 
     // Extract audio files from archives (lazy loading for large archives)
     for (const archiveUri of archiveUris) {
@@ -369,8 +418,8 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
         const data = await vscode.workspace.fs.readFile(archiveUri);
         const archiveName = path.basename(archiveUri.fsPath);
         const cacheKey = archiveUri.fsPath;
-        const { buffer, entries } = await parseTarIndex(new Uint8Array(data), archiveName);
-        this.tarCache.set(cacheKey, { buffer, entries });
+        const { buffer, entries, jsons } = await parseTarIndex(new Uint8Array(data), archiveName);
+        this.tarCache.set(cacheKey, { buffer, entries, jsons });
         this.loadedFiles.add(archiveUri.fsPath);
 
         const displayName = (n: string) => n.split('/').pop() || n;
@@ -400,6 +449,16 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
             }));
             webviewPanel.webview.postMessage({ type: 'fileURIs', files: tarUris });
           }
+        }
+
+        // Pair .json entries inside the same archive with same-stem audio.
+        if (jsons.length > 0) {
+          const items = jsons.map(j => ({
+            name: displayName(j.name),
+            filePath: 'tar:' + cacheKey + '\n' + j.name,
+            text: buffer.subarray(j.offset, j.offset + j.size).toString('utf8').replace(/\0+$/g, ''),
+          }));
+          webviewPanel.webview.postMessage({ type: 'metaData', items });
         }
       } catch (e) {
         console.error('Failed to extract archive:', archiveUri.fsPath, e);

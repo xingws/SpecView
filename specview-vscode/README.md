@@ -36,6 +36,19 @@ Toggle the waveform view via the **Waveform** checkbox in the toolbar to display
 
 For large file sets, tracks are decoded on scroll for fast initial loading, and the card list is **windowed** — a bounded number of cards are rendered and more appear as you scroll (infinite scroll). Far-offscreen cards are recycled and restored on scroll-back, so the DOM stays light even with thousands of files.
 
+### Paired JSON Metadata Panel
+
+A `.json` file stored next to an audio file (same stem, e.g. `clip.wav` + `clip.json`) is matched and shown in a **metadata panel** to the right of that card — or, for a diff group, to the right of the group showing the active lane's JSON.
+
+- Click any **JSON key** to multi-select it; the values for that field across all loaded files are shown for quick comparison
+- The **fields** pill opens a searchable browser of every field present in the loaded files
+- Drag the divider (or double-click to reset) to resize the panel width
+- A **JSON** toolbar checkbox toggles all metadata panels on/off. Unpaired `.json` files (no matching audio) appear as their own **standalone JSON cards** while the toggle is on.
+
+### Multichannel Playback
+
+Stereo and multichannel files (2–8 channels) are expanded into **one lane per channel**, each with its own waveform, spectrogram, and frequency axis. Playback **mixes all channels** by default — on a stereo file you hear both channels in both ears. Each lane has a **Mute** button to silence that channel; any combination of channels can be muted at once. Channels beyond 8 fall back to a single mixed view.
+
 ### Time Axis Zoom
 
 Zoom into any region of the spectrogram for detailed inspection:

@@ -1,8 +1,8 @@
-import type { Track, Group, DecodedItem } from './types';
-import { SPEC_H, SPEC_H_DIFF, renderSpec, drawSpec, drawWaveform, getWaveformHeight } from './spectrogram';
+import type { Track, Group, DecodedItem, GroupResult, AnalysisSpan } from './types';
+import { SPEC_H, SPEC_H_DIFF, renderSpec, drawSpec, drawWaveform, getWaveformHeight, channelSpecHeight } from './spectrogram';
 import { TAG_CSS, stripExt, extractTag, groupByBaseName, getParentFolderName, parseNativeSampleRate } from './grouping';
-import { playSource, stopSource, getPos, resumeAudio, decodeToAudioBuffer } from './audio';
-import { runAnalysis, runAnalysisGroup } from './analysis';
+import { playSource, stopSource, getPos, resumeAudio, decodeToAudioBuffer, applyChannelListen } from './audio';
+import { runAnalysis, runAnalysisGroup, renderAnalysisStrip } from './analysis';
 import { fmt, fmtShort, esc } from './util';
 
 const MIN_VIEW_SPAN = 0.05; // minimum visible span in seconds
@@ -15,18 +15,531 @@ let nextGrpId = 1;
 let activeTrackId: number | null = null;
 let rafId: number | null = null;
 let waveformVisible = false;
+let autoGroup = true;
+let groupingBusy = false;   // guards the async regroup/split chunk loop
 
 let tracksBox: HTMLElement;
 let dropZone: HTMLElement;
 let btnPlay: HTMLButtonElement;
 let btnStop: HTMLButtonElement;
 let btnAnalyzeAll: HTMLButtonElement;
+let btnGrouping: HTMLButtonElement;
 let btnZoomIn: HTMLButtonElement;
 let btnZoomOut: HTMLButtonElement;
 let btnZoomFit: HTMLButtonElement;
 let timeDisp: HTMLElement;
 let playIcon: HTMLElement;
 let playLabel: HTMLElement;
+
+// ========== PAIRED JSON METADATA ==========
+let metaVisible = false;
+const META_SHOW_MAX = 120000;   // cap displayed JSON length (chars)
+const META_WIDTH_DEFAULT = 300;
+const META_WIDTH_MIN = 180;
+let metaSelPaths = new Set<string>();
+const metaMap = new Map<string, string>();  // metaKeyOf(name, filePath) -> raw text
+const metaSource = new Map<string, string>(); // metaKey -> source filePath (for cleanup)
+const metaTreeCache = new Map<string, string>();
+const metaLeafCache = new Map<string, Map<string, boolean>>();
+
+/** Paired-JSON key, mirroring the web implementation. */
+function metaKeyOf(name: string, filePath?: string): string {
+  let dir = '';
+  if (filePath) {
+    const parts = String(filePath).replace(/\\/g, '/').split('/');
+    parts.pop();
+    dir = parts.join('/');
+  }
+  return (dir ? dir.toLowerCase() + '/' : '') + String(name).replace(/\.[^.]+$/, '').toLowerCase();
+}
+
+function metaKeyName(t: { name: string; filePath?: string }): string {
+  return metaKeyOf(t.name, t.filePath);
+}
+
+/** Ingest meta items from the extension host: store by key, then attach to any
+ *  loaded track / group lane with the same stem. Unpaired .json files (no audio
+ *  with the same stem) become standalone JSON cards, visible while the JSON
+ *  toggle is on. */
+export function receiveMetaData(items: { name: string; filePath?: string; text: string }[]): void {
+  let changed = false;
+  for (const it of items) {
+    const key = metaKeyOf(it.name, it.filePath);
+    if (key && it.text !== undefined) {
+      if (metaMap.get(key) !== it.text) { metaMap.set(key, it.text); changed = true; }
+      if (it.filePath) metaSource.set(key, it.filePath);
+    }
+  }
+  if (!changed) return;
+  metaTreeCache.clear();
+  metaLeafCache.clear();
+  for (const t of tracks) {
+    const m = metaMap.get(metaKeyOf(t.name, t.filePath)) || metaMap.get(metaKeyOf(t.name)) || null;
+    t.meta = m;
+    if (t.metaPanel) setMetaBody(t.metaPanel.body, t.meta);
+  }
+  for (const g of groups) {
+    const active = getActiveLaneOfGroup(g) || (g.trackIds.map(id => tracks.find(x => x.id === id)).find(Boolean));
+    if (g.metaPanel) setMetaBody(g.metaPanel.body, active ? active.meta : null);
+  }
+  ensureStandaloneJsonCards();
+}
+
+export function setMetaVisible(v: boolean): void {
+  metaVisible = v;
+  for (const t of tracks) {
+    if (t.metaPanel) t.metaPanel.aside.classList.toggle('show', v);
+  }
+  for (const g of groups) {
+    if (g.metaPanel) g.metaPanel.aside.classList.toggle('show', v);
+  }
+  if (v) ensureStandaloneJsonCards();
+  setStandaloneJsonCardVisibility(v);
+  reflowSpectrograms();
+}
+
+/** List of standalone JSON cards (unpaired .json metadata). */
+interface JsonCard { key: string; filePath?: string; name: string; card: HTMLElement; panel: { aside: HTMLElement; body: HTMLElement; head: HTMLElement }; }
+const jsonCards: JsonCard[] = [];
+
+/** A meta key that is already "paired" to a loaded audio track. */
+function isMetaKeyPaired(key: string): boolean {
+  for (const t of tracks) {
+    if (metaKeyOf(t.name, t.filePath) === key || metaKeyOf(t.name) === key) return true;
+  }
+  return false;
+}
+
+/** Create standalone JSON cards for metaMap keys that do not match any audio. */
+function ensureStandaloneJsonCards(): void {
+  const have = new Set(jsonCards.map(c => c.key));
+  for (const [key, text] of metaMap) {
+    if (have.has(key) || isMetaKeyPaired(key)) continue;
+    const filePath = metaSource.get(key) || undefined;
+    const base = filePath ? filePath.replace(/\\/g, '/').split('/').pop() || key : key;
+    const card = document.createElement('div');
+    card.className = 'card json-card';
+    const hdr = document.createElement('div');
+    hdr.className = 'card-header';
+    hdr.innerHTML =
+      '<span class="card-title" title="' + esc(base) + '">' + esc(base) + '</span>' +
+      '<button class="card-remove" title="Remove">&times;</button>';
+    hdr.querySelector('.card-remove')!.addEventListener('click', e => { e.stopPropagation(); removeJsonCard(key); });
+    card.appendChild(hdr);
+    const panel = buildMetaPanel();
+    panel.aside.classList.add('show');
+    card.appendChild(panel.aside);
+    setMetaBody(panel.body, text);
+    tracksBox.appendChild(card);
+    jsonCards.push({ key, filePath, name: base, card, panel });
+  }
+  setStandaloneJsonCardVisibility(metaVisible);
+}
+
+/** Toggle standalone JSON card visibility (keep DOM, just hide like .meta-aside). */
+function setStandaloneJsonCardVisibility(v: boolean): void {
+  for (const jc of jsonCards) {
+    jc.card.style.display = v ? '' : 'none';
+  }
+}
+
+/** Remove a standalone JSON card (and its metaMap entry). */
+function removeJsonCard(key: string): void {
+  const i = jsonCards.findIndex(c => c.key === key);
+  if (i < 0) return;
+  const c = jsonCards[i];
+  if (c.card) c.card.remove();
+  jsonCards.splice(i, 1);
+  metaMap.delete(key);
+  const filePath = c.filePath;
+  if (filePath) (window as any).__vscodePostMessage?.({ type: 'removeFromLoaded', filePath });
+}
+
+/** Track captured by a group card's active lane (for showing that lane's JSON). */
+function getActiveLaneOfGroup(g: Group): Track | undefined {
+  if (activeTrackId != null) {
+    const t = tracks.find(x => x.id === activeTrackId && x.groupId === g.id);
+    if (t) return t;
+  }
+  for (const id of g.trackIds) {
+    const t = tracks.find(x => x.id === id);
+    if (t) return t;
+  }
+  return undefined;
+}
+
+// ========== JSON METADATA RENDERING ==========
+
+function escMetaText(s: string): string {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function escAttr(s: string): string { return escMetaText(s).replace(/"/g, '&quot;'); }
+
+function highlightJson(text: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const n = text.length;
+  const isNumChar = (c: string) => (c >= '0' && c <= '9') || c === '-' || c === '+' || c === '.' || c === 'e' || c === 'E';
+  while (i < n) {
+    const ch = text[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') { out.push(ch); i++; continue; }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === '"') { j++; break; }
+        j++;
+      }
+      const lit = text.slice(i, j);
+      let k = j;
+      while (k < n && (text[k] === ' ' || text[k] === '\t')) k++;
+      const isKey = text[k] === ':';
+      const cls = isKey ? 'jv-key' : 'jv-str';
+      out.push('<span class="' + cls + '">' + escMetaText(lit) + '</span>');
+      i = j;
+      continue;
+    }
+    if (isNumChar(ch)) {
+      let j = i;
+      while (j < n && isNumChar(text[j])) j++;
+      out.push('<span class="jv-num">' + escMetaText(text.slice(i, j)) + '</span>');
+      i = j;
+      continue;
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      let j = i;
+      while (j < n && /[A-Za-z]/.test(text[j])) j++;
+      const word = text.slice(i, j);
+      const cls = word === 'true' || word === 'false' ? 'jv-bool' : (word === 'null' ? 'jv-null' : 'jv-punc');
+      out.push('<span class="' + cls + '">' + word + '</span>');
+      i = j;
+      continue;
+    }
+    if ('{}[],:'.indexOf(ch) >= 0) { out.push('<span class="jv-punc">' + ch + '</span>'); i++; continue; }
+    out.push(escMetaText(ch)); i++;
+  }
+  return out.join('');
+}
+
+function renderJsonMeta(raw: string): string {
+  if (!raw) return '<span class="meta-empty">No JSON</span>';
+  let text: string;
+  try {
+    const parsed = JSON.parse(raw);
+    text = (parsed !== null && typeof parsed === 'object')
+      ? JSON.stringify(parsed, null, 2)
+      : String(raw);
+  } catch (e) {
+    const em = e instanceof Error ? e.message : String(e);
+    return '<div class="meta-err">Invalid JSON — ' + escMetaText(em) + '</div>' +
+           '<pre class="meta-raw">' + escMetaText(raw) + '</pre>';
+  }
+  const truncated = text.length > META_SHOW_MAX;
+  let html = highlightJson(truncated ? text.slice(0, META_SHOW_MAX) : text);
+  if (truncated) html += '<div class="meta-trunc">… truncated (' + text.length.toLocaleString() + ' chars) — metadata only</div>';
+  return html;
+}
+
+function buildMetaPanel(): { aside: HTMLElement; body: HTMLElement; head: HTMLElement } {
+  const aside = document.createElement('div');
+  aside.className = 'meta-aside';
+  const head = document.createElement('div');
+  head.className = 'meta-head';
+  head.innerHTML =
+    '<button class="meta-pill" title="Browse all fields across loaded files">fields</button>' +
+    '<span class="meta-head-lbl">JSON metadata</span>' +
+    '<button class="meta-clear" title="Clear field selection (show full JSON)">&times;</button>';
+  head.querySelector('.meta-clear')!.addEventListener('click', clearMetaSel);
+  head.querySelector('.meta-pill')!.addEventListener('click', e => { e.stopPropagation(); toggleMetaPop(e.currentTarget as HTMLElement); });
+  const body = document.createElement('div');
+  body.className = 'meta-body';
+  aside.appendChild(head);
+  aside.appendChild(body);
+  return { aside, body, head };
+}
+
+function makeMetaResizer(row: HTMLElement, after: () => void): HTMLElement {
+  const rz = document.createElement('div');
+  rz.className = 'meta-resizer';
+  rz.title = 'Drag to resize the JSON panel · double-click to reset to default';
+  rz.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    rz.classList.add('dragging');
+    const onMove = (ev: PointerEvent) => {
+      const rect = row.getBoundingClientRect();
+      const maxW = Math.max(META_WIDTH_MIN, rect.width - 220);
+      const w = Math.max(META_WIDTH_MIN, Math.min(ev.clientX < rect.right ? (rect.right - ev.clientX) : maxW, maxW));
+      document.documentElement.style.setProperty('--meta-width', w + 'px');
+    };
+    const onUp = () => {
+      rz.classList.remove('dragging');
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      try { localStorage.setItem('specview-meta-width', metaWidthNow()); } catch { /* ignore */ }
+      after();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
+  rz.addEventListener('dblclick', e => {
+    e.stopPropagation();
+    document.documentElement.style.setProperty('--meta-width', '');
+    try { localStorage.removeItem('specview-meta-width'); } catch { /* ignore */ }
+    after();
+  });
+  return rz;
+}
+
+function metaWidthNow(): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--meta-width').trim();
+  return v || (META_WIDTH_DEFAULT + 'px');
+}
+
+function setMetaBody(body: HTMLElement | null | undefined, meta: string | null | undefined): void {
+  if (!body) return;
+  const html = metaBodyHtml(meta || '');
+  if (body._metaLast === html) return;
+  body._metaLast = html;
+  body.innerHTML = html;
+  body.scrollTop = 0;
+}
+
+declare global { interface HTMLElement { _metaLast?: string; } }
+
+// ---- field selection ----
+function refreshMetaBodies(): void {
+  for (const t of tracks) {
+    if (t.metaPanel && t.metaPanel.body) setMetaBody(t.metaPanel.body, t.meta);
+  }
+  for (const g of groups) {
+    const active = getActiveLaneOfGroup(g);
+    if (g.metaPanel) setMetaBody(g.metaPanel.body, active ? active.meta : null);
+  }
+  updateMetaHeads();
+}
+
+function selectedValue(parsed: unknown, path: string): unknown {
+  let cur: any = parsed;
+  for (const part of path.split('.')) {
+    if (cur == null) return undefined;
+    if (Array.isArray(cur)) { const i = Number(part); if (!Number.isNaN(i)) cur = cur[i]; else return undefined; }
+    else if (typeof cur === 'object') cur = cur[part];
+    else return undefined;
+  }
+  return cur;
+}
+
+function metaValueHtml(parsed: unknown, path: string): string {
+  const v = selectedValue(parsed, path);
+  if (v === undefined) return '<span class="meta-sel-missing">not present in this file</span>';
+  if (v !== null && typeof v === 'object') {
+    try { return highlightJson(JSON.stringify(v, null, 2).slice(0, META_SHOW_MAX)); }
+    catch { return escMetaText(String(v)); }
+  }
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if ((t[0] === '{' || t[0] === '[') && t.length < 200000) {
+      try { return highlightJson(JSON.stringify(JSON.parse(t), null, 2).slice(0, META_SHOW_MAX)); }
+      catch { /* fallthrough */ }
+    }
+    return escMetaText(v.slice(0, 220));
+  }
+  return escMetaText(String(v));
+}
+
+function toggleMetaKey(path: string): void {
+  if (metaSelPaths.has(path)) metaSelPaths.delete(path); else metaSelPaths.add(path);
+  refreshMetaBodies();
+}
+function removeMetaKey(path: string): void { metaSelPaths.delete(path); refreshMetaBodies(); }
+function clearMetaSel(): void { metaSelPaths.clear(); refreshMetaBodies(); }
+
+function updateMetaHeads(): void {
+  const n = metaSelPaths.size;
+  for (const t of tracks) { if (t.metaPanel && t.metaPanel.head) updateHead(t.metaPanel.head, n); }
+  for (const g of groups) { if (g.metaPanel && g.metaPanel.head) updateHead(g.metaPanel.head, n); }
+}
+function updateHead(head: HTMLElement, n: number): void {
+  const lbl = head.querySelector('.meta-head-lbl');
+  if (lbl) lbl.textContent = n ? (n + ' field' + (n === 1 ? '' : 's')) : 'JSON metadata';
+  document.body.classList.toggle('meta-sel', n > 0);
+}
+
+function treePushDeep(v: unknown, depth: number, out: string[]): void { renderTreeInto(v, depth, out, ''); }
+
+function renderTreeInto(v: unknown, depth: number, out: string[], prefix: string): void {
+  if (v === null || typeof v !== 'object') {
+    out.push(lineHtml(depth, '<span class="jv-' + jsonScalarCls(v) + '">' + escMetaText(String(v)) + '</span>'));
+    return;
+  }
+  if (Array.isArray(v)) {
+    if (v.length === 0) { out.push(lineHtml(depth, '<span class="jv-punc">[]</span>')); return; }
+    for (let i = 0; i < v.length; i++) {
+      const p = prefix ? prefix + '.' + i : String(i);
+      out.push(lineHtml(depth, '<span class="jv-punc">' + i + ':</span>'));
+      renderTreeInto(v[i], depth + 1, out, p);
+    }
+    return;
+  }
+  const keys = Object.keys(v);
+  if (keys.length === 0) { out.push(lineHtml(depth, '<span class="jv-punc">{}</span>')); return; }
+  for (const k of keys) {
+    const p = prefix ? prefix + '.' + k : k;
+    const val = (v as Record<string, unknown>)[k];
+    if (val !== null && typeof val === 'object' || (typeof val === 'string' && ((val as string).trim().startsWith('{') || (val as string).trim().startsWith('[')) && val.length < 200000)) {
+      if (typeof val === 'string') {
+        try { val && renderTreeInto(JSON.parse(val as string), depth, out, p); continue; }
+        catch { /* fallthrough literal */ }
+      }
+      out.push(lineHtml(depth, '<span class="js-meta-key" data-path="' + escAttr(p) + '" title="Select field ' + escAttr(p) + '">' + k + '</span>' + ' <span class="jv-punc">{…}</span>'));
+      renderTreeInto(val, depth + 1, out, p);
+      continue;
+    }
+    const keyCls = metaSelPaths.has(p) ? 'jv-key js-meta-key meta-key-on' : 'jv-key js-meta-key';
+    out.push(lineHtml(depth,
+      '<span class="' + keyCls + '" data-path="' + escAttr(p) + '" title="Select field ' + escAttr(p) + '">' + k + '</span>' +
+      '<span class="jv-punc">:</span> <span class="jv-str-ish">' + jsonScalarHtml(val) + '</span>'));
+  }
+}
+function lineHtml(depth: number, content: string): string {
+  return '<div class="json-line" style="padding-left:' + (depth * 14) + 'px">' + content + '</div>';
+}
+function jsonScalarCls(v: unknown): string {
+  if (typeof v === 'number') return 'num';
+  if (typeof v === 'boolean') return 'bool';
+  if (v === null) return 'null';
+  return 'str';
+}
+function jsonScalarHtml(v: unknown): string {
+  if (v === null) return '<span class="jv-null">null</span>';
+  if (Array.isArray(v)) return '<span class="jv-punc">' + escMetaText(JSON.stringify(v)) + '</span>';
+  if (typeof v === 'object') return '<span class="jv-punc">{…}</span>';
+  if (typeof v === 'string') return '<span class="jv-str">' + escMetaText(v.length > 220 ? v.slice(0, 220) + '…' : v) + '</span>';
+  return '<span class="jv-' + jsonScalarCls(v) + '">' + escMetaText(String(v)) + '</span>';
+}
+
+function metaBodyHtml(meta: string | null | undefined): string {
+  if (!meta) return '<span class="meta-empty">No paired .json file</span>';
+  if (metaSelPaths.size === 0) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(meta); }
+    catch { return renderJsonMeta(meta); }
+    const out: string[] = [];
+    renderTreeInto(parsed, 0, out, '');
+    return out.join('');
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(meta); } catch { parsed = null; }
+  const parts: string[] = [];
+  for (const p of metaSelPaths) {
+    parts.push('<div class="meta-sel"><span class="meta-sel-lbl js-meta-key" data-path="' + escAttr(p) + '">' + escMetaText(p) + '</span>' +
+      '<div class="meta-sel-val">' + metaValueHtml(parsed, p) + '</div></div>');
+  }
+  return parts.join('');
+}
+
+function metaTreeCached(raw: string): string {
+  const c = metaTreeCache.get(raw);
+  if (c) return c;
+  const h = metaBodyHtml(raw);
+  if (metaTreeCache.size > 8000) metaTreeCache.clear();
+  metaTreeCache.set(raw, h);
+  return h;
+}
+
+// ---- fields popup ----
+let metaPopEl: HTMLElement | null = null;
+function ensureMetaPop(): HTMLElement {
+  if (metaPopEl) return metaPopEl;
+  const pop = document.createElement('div');
+  pop.className = 'meta-pop';
+  pop.innerHTML =
+    '<div class="mpo-head"><span class="mpo-title">Select fields</span><button class="mpo-x" title="Close">&times;</button></div>' +
+    '<input class="mpo-search" placeholder="Filter fields…" />' +
+    '<div class="mpo-list"></div>' +
+    '<div class="mpo-foot"><button class="mpo-clear">Clear all</button></div>';
+  (pop.querySelector('.mpo-x') as HTMLElement).addEventListener('click', closeMetaPop);
+  (pop.querySelector('.mpo-clear') as HTMLElement).addEventListener('click', clearMetaSel);
+  const inp = pop.querySelector('.mpo-search') as HTMLInputElement;
+  inp.addEventListener('input', () => buildMetaPopList(pop, inp.value));
+  document.body.appendChild(pop);
+  metaPopEl = pop;
+  return pop;
+}
+function discoverMetaFields(): Map<string, number> {
+  const m = new Map<string, number>();
+  const bump = (raw: string) => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { return; }
+    const walk = (v: unknown, prefix: string) => {
+      if (!v || typeof v !== 'object') return;
+      if (Array.isArray(v)) { v.forEach((x, i) => walk(x, prefix ? prefix + '.' + i : String(i))); return; }
+      for (const k of Object.keys(v)) {
+        const p = prefix ? prefix + '.' + k : k;
+        m.set(p, (m.get(p) || 0) + 1);
+        walk((v as Record<string, unknown>)[k], p);
+      }
+    };
+    walk(parsed, '');
+  };
+  for (const t of tracks) if (t.meta) bump(t.meta);
+  return m;
+}
+function buildMetaPopList(pop: HTMLElement, filter: string): void {
+  const list = pop.querySelector('.mpo-list') as HTMLElement;
+  const fields = discoverMetaFields();
+  const names = Array.from(fields.keys()).sort();
+  const q = filter.trim().toLowerCase();
+  let html = '';
+  for (const n of names) {
+    if (q && !n.toLowerCase().includes(q)) continue;
+    html += '<label class="mpo-item"><input type="checkbox" data-path="' + escAttr(n) + '"' + (metaSelPaths.has(n) ? ' checked' : '') + ' />' +
+      '<span class="mpo-name">' + escMetaText(n) + '</span>' +
+      '<span class="mpo-count">' + fields.get(n) + '</span></label>';
+  }
+  if (!html) html = '<div class="mpo-empty">' + (filter ? 'No matching fields' : 'No JSON fields loaded — open a .json first.') + '</div>';
+  list.innerHTML = html;
+  list.querySelectorAll<HTMLInputElement>('input[data-path]').forEach(cb => {
+    cb.addEventListener('change', () => { const p = cb.dataset.path || ''; toggleMetaKey(p); });
+  });
+}
+function toggleMetaPop(anchor: HTMLElement): void {
+  const pop = ensureMetaPop();
+  pop.classList.toggle('open');
+  buildMetaPopList(pop, '');
+  if (pop.classList.contains('open')) {
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = Math.max(4, r.right - 260) + 'px';
+    pop.style.top = (r.bottom + 6) + 'px';
+  }
+}
+function closeMetaPop(): void {
+  if (metaPopEl) { metaPopEl.classList.remove('open'); }
+}
+function metaPanelsMarkStale(): void {
+  for (const t of tracks) if (t.metaPanel) t.metaPanel.body._metaLast = undefined;
+  for (const g of groups) if (g.metaPanel) g.metaPanel.body._metaLast = undefined;
+}
+function refreshMetaWindow(): void {
+  for (const t of tracks) {
+    if (!t.metaPanel) continue;
+    if (metaElNearViewport(t.el)) setMetaBody(t.metaPanel.body, t.meta);
+  }
+  for (const g of groups) {
+    if (!g.metaPanel) continue;
+    if (metaElNearViewport(g.el)) {
+      const active = getActiveLaneOfGroup(g);
+      setMetaBody(g.metaPanel.body, active ? active.meta : null);
+    }
+  }
+}
+function metaElNearViewport(el: HTMLElement | null): boolean {
+  if (!el) return true;
+  const er = el.getBoundingClientRect();
+  const box = tracksBox.getBoundingClientRect();
+  return !(er.bottom < box.top - 600 || er.top > box.bottom + 600);
+}
 
 // Lazy loading observer with concurrency limit
 const MAX_CONCURRENT_LOADS = 3;
@@ -95,6 +608,72 @@ function isTrackAlive(t: Track): boolean {
   return tracks.some(tr => tr.id === t.id);
 }
 
+/**
+ * Lazy-created placeholder cards are single-view; once decoded, a multichannel
+ * standalone must be re-rendered with one lane per channel. Rebuilds only the
+ * .track-body inside the existing card (header/ruler stay).
+ */
+function rebuildBodyAsMulti(t: Track): void {
+  const card = t.el;
+  if (!card) return;
+  const old = card.querySelector('.track-body') as HTMLElement | null;
+  const ruler = card.querySelector('.time-ruler') as HTMLElement | null;
+  t.isMulti = true;
+  ensureChannelViews(t, expandChannelCount(t));
+  const body = buildSpecBody(t, SPEC_H);
+  if (old && old.parentNode) {
+    if (ruler && ruler.parentNode === card) card.insertBefore(body, ruler);
+    else if (old.nextSibling) card.insertBefore(body, old.nextSibling);
+    else card.appendChild(body);
+    old.remove();
+  } else if (ruler && ruler.parentNode === card) {
+    card.insertBefore(body, ruler);
+  } else {
+    card.appendChild(body);
+  }
+}
+
+/** Remove a now-multichannel member from its diff group (multichannel files are
+ *  never allowed to stay in a group) and re-create the whole set as standalone
+ *  cards at the same DOM position. Returns true if a split happened. */
+function splitMultiOutOfGroup(t: Track): boolean {
+  const g = groups.find(gr => gr.id === t.groupId);
+  if (!g) return false;
+  const placeholder = document.createElement('div');
+  if (g.el && g.el.parentNode === tracksBox) tracksBox.insertBefore(placeholder, g.el);
+  const gid = g.id;
+  const members = g.trackIds
+    .map(id => tracks.find(x => x.id === id))
+    .filter((x): x is Track => !!x && x.id !== t.id);
+  removeDiffGroupQuietly(gid);
+  // Re-create remaining group members as individual standalone cards.
+  const els: (HTMLElement | null)[] = [];
+  for (const m of members) {
+    els.push(createStandalone(m.name, m.buffer || null, m.nativeSR, m.filePath, m.lazyUri));
+  }
+  // Re-create the multichannel track itself as a standalone (builds channel lanes).
+  const selfEl = createStandalone(t.name, t.buffer || null, t.nativeSR, t.filePath, t.lazyUri);
+  els.push(selfEl);
+  // Place all newly created cards at the group's original DOM position.
+  for (const el of els) {
+    if (el && placeholder.parentNode && el.parentNode === tracksBox) {
+      tracksBox.insertBefore(el, placeholder);
+    }
+  }
+  if (placeholder.parentNode) placeholder.remove();
+  // The removed group card may have been tracked by the windowed list.
+  pruneRendered();
+  fixActiveTrack();
+  refreshUI();
+  // Trigger render for a freshly created multichannel standalone.
+  const self = tracks.find(x => x.el === selfEl);
+  if (self && self.isMulti && self.loaded && self._pendingRender) {
+    self._pendingRender();
+    self._pendingRender = null;
+  }
+  return true;
+}
+
 async function loadTrack(t: Track): Promise<void> {
   if (t.loaded || t._loading) return;
   t._loading = true;
@@ -129,6 +708,46 @@ async function loadTrack(t: Track): Promise<void> {
     t.nyquist = t.sr / 2;
     t.renderSR = t.buffer.sampleRate;
     t.viewEnd = t.duration;
+    // A lazy-created placeholder does not know the channel count until decoded.
+    const nCh = t.buffer ? t.buffer.numberOfChannels : 0;
+    const expandLanes = nCh >= 2 && nCh <= 8;   // render one lane per channel
+    const noGroup = nCh > 1;                     // multichannel never stays grouped
+    if (noGroup && !t.isMulti) {
+      if (t.groupId != null) {
+        // Multichannel files never stay in a diff group — split this member out.
+        // splitMultiOutOfGroup re-creates fresh standalone cards and triggers
+        // their renders, so nothing more should touch the (now removed) track.
+        if (isTrackAlive(t)) splitMultiOutOfGroup(t);
+        if (loading && loading.parentNode) loading.remove();
+        t._loading = false;
+        return;
+      }
+      t.isMulti = true;
+      if (expandLanes) rebuildBodyAsMulti(t);
+      // else: >8ch fallback keeps the existing single (mixed) view.
+    }
+    // Lazy placeholder was built with an unknown nyquist (no freq labels). Now
+    // that the sample rate is known, fill any empty .freq-labels within this
+    // track's own body. Multi lanes rebuilt by rebuildBodyAsMulti are already
+    // labelled, so only empty containers are touched (no cross-lane bleed).
+    if (t.nyquist > 0) {
+      const bodies = new Set<HTMLElement>();
+      if (t.canvas) {
+        const b = t.canvas.closest('.track-body') as HTMLElement | null;
+        if (b) bodies.add(b);
+      }
+      for (const ch of t.chViews) {
+        if (ch.canvas) {
+          const b = ch.canvas.closest('.track-body') as HTMLElement | null;
+          if (b) bodies.add(b);
+        }
+      }
+      for (const b of bodies) {
+        b.querySelectorAll('.freq-labels').forEach(fl => {
+          if (!fl.querySelector('.freq-tick')) addFreqLabels(fl as HTMLElement, t.nyquist);
+        });
+      }
+    }
     // Trigger render
     if (t._pendingRender) {
       t._pendingRender();
@@ -184,10 +803,11 @@ function mkTrack(name: string, buffer: AudioBuffer | null, nativeSR: number, fil
     id, name, buffer: buffer as AudioBuffer, loaded, duration: dur, nyquist: ny, sr: displaySR, nativeSR: displaySR, renderSR: loaded ? buffer!.sampleRate : 0,
     canvas: null, wrapper: null, ph: null, laneLabel: null, analysisStrip: null, analyzeBtn: null, rulerEl: null,
     playing: false, startTime: 0, offset: 0, source: null,
-    groupId: null, el: null, analysisResults: null, filePath, lazyUri,
+    groupId: null, el: null, meta: null, metaPanel: null, analysisResults: null, analysisCollapsed: false, filePath, lazyUri,
     viewStart: 0, viewEnd: dur,
     specData: null, specFrames: 0, specHop: 0, specH: 0, specMaxBin: 0, specGlobalPeak: -Infinity,
     waveformCanvas: null, waveformWrapper: null, waveformRow: null, waveformPh: null,
+    isMulti: false, chViews: [], mutedCh: new Set(), activeCh: null, muteBtn: [],
   };
 }
 
@@ -256,7 +876,55 @@ function addWaveformLabels(el: HTMLElement, h: number): void {
   }
 }
 
+/** Number of channels to render as separate lanes, or 0 to keep single view
+ *  (mono file, >8ch fallback, or a file inside a diff group). */
+function expandChannelCount(track: Track): number {
+  if (!track.buffer) return 0;
+  if (track.groupId != null) return 0; // group lanes are never expanded
+  const n = track.buffer.numberOfChannels;
+  if (n < 2 || n > 8) return 0;
+  return n;
+}
+
+function isMultiTrack(track: Track): boolean {
+  return track.isMulti && track.chViews.length > 0;
+}
+
+/** Add a per-channel entry to a multichannel track's chViews. */
+function ensureChannelViews(track: Track, n: number): void {
+  if (!track.isMulti || track.chViews.length) return;
+  track.chViews = [];
+  for (let i = 0; i < n; i++) {
+    track.chViews.push({
+      chIndex: i,
+      canvas: null, wrapper: null, ph: null,
+      waveformCanvas: null, waveformWrapper: null, waveformRow: null, waveformPh: null,
+      specData: null, specFrames: 0, specHop: 0, specH: 0, specMaxBin: 0, specGlobalPeak: -Infinity,
+      labelEl: null,
+    });
+  }
+}
+
 function buildSpecBody(track: Track, h: number): HTMLElement {
+  // A standalone multichannel file (any ch>1) is never grouped. Tracks created
+  // inside a diff group stay single-view (mono lanes) even if the buffer later
+  // turns out multichannel — such members are split out on decode instead.
+  if (track.groupId == null && track.buffer && track.buffer.numberOfChannels > 1) track.isMulti = true;
+  const chCount = expandChannelCount(track);
+  if (chCount >= 2) {
+    track.chViews = track.chViews.length ? track.chViews : [];
+    ensureChannelViews(track, chCount);
+    return buildMultiChannelBody(track, h);
+  }
+  track.chViews = [];
+  return buildSingleLaneBody(track, h);
+}
+
+/**
+ * Single-view body — waveform row + one spectrogram row + analysis strip.
+ * Used for mono tracks, diff-group lanes and the multichannel fallback.
+ */
+function buildSingleLaneBody(track: Track, h: number): HTMLElement {
   const el = document.createElement('div');
   el.className = 'track-body';
   el.style.flexDirection = 'column';
@@ -282,6 +950,7 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
 
   // Spectrogram row
   const specRow = document.createElement('div');
+  specRow.className = 'spec-row';
   specRow.style.cssText = 'display:flex;flex:1;min-height:0';
   specRow.innerHTML =
     '<div class="freq-labels" style="height:' + h + 'px"></div>' +
@@ -304,23 +973,194 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
   addFreqLabels(specRow.querySelector('.freq-labels') as HTMLElement, track.nyquist);
   const loading = specRow.querySelector('.loading-overlay') as HTMLElement;
 
-  // Click to seek (zoom-aware) — also on waveform wrapper
+  attachLaneInteractions(track, track.canvas, track.wrapper!, track.waveformWrapper!);
+  wirePendingRender(track, el, loading);
+
+  return el;
+}
+
+/**
+ * Multichannel body — one channel lane (label + waveform + spectrogram) per
+ * channel, sharing the track's time axis/ruler. One analysis strip at the end.
+ */
+function buildMultiChannelBody(track: Track, h: number): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'track-body';
+  el.style.flexDirection = 'column';
+
+  const loadings: HTMLElement[] = [];
+
+  for (let i = 0; i < track.chViews.length; i++) {
+    const ch = track.chViews[i];
+    const chH = channelSpecHeight(track.chViews.length);
+
+    const laneEl = document.createElement('div');
+    laneEl.className = 'ch-lane';
+
+    // Channel label row
+    const lblRow = document.createElement('div');
+    lblRow.className = 'ch-label';
+    lblRow.innerHTML =
+      '<span class="ch-tag">' + esc('Ch' + (i + 1)) + '</span>' +
+      '<span class="ch-name">' + esc(channelName(i)) + '</span>' +
+      '<button class="ch-mute" title="Mute this channel">Mute</button>' +
+      '<span class="ch-spacer"></span>';
+    const muteBtn = lblRow.querySelector('.ch-mute') as HTMLButtonElement;
+    track.muteBtn[i] = muteBtn;
+    lblRow.querySelector('.ch-name')!.addEventListener('click', e => {
+      e.stopPropagation();
+      selectChannel(track, i);
+    });
+    muteBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      selectChannel(track, i);
+      if (track.mutedCh.has(i)) track.mutedCh.delete(i);
+      else track.mutedCh.add(i);
+      updateChannelListenUI(track);
+      applyChannelListen(track);
+    });
+    laneEl.appendChild(lblRow);
+    ch.labelEl = lblRow;
+
+    // Waveform row
+    const wfH = getWaveformHeight(chH);
+    const waveRow = document.createElement('div');
+    waveRow.className = 'waveform-row';
+    waveRow.style.height = wfH + 'px';
+    waveRow.style.display = waveformVisible ? 'flex' : 'none';
+    waveRow.innerHTML =
+      '<div class="waveform-labels" style="height:' + wfH + 'px"></div>' +
+      '<div class="waveform-wrapper" style="flex:1;position:relative;overflow:hidden;cursor:crosshair">' +
+      '<canvas height="' + wfH + '"></canvas>' +
+      '<div class="waveform-playhead" style="position:absolute;top:0;left:0;width:2px;height:100%;background:#ff3333;pointer-events:none;z-index:10;will-change:transform"></div>' +
+      '</div>';
+    laneEl.appendChild(waveRow);
+    ch.waveformRow = waveRow;
+    ch.waveformWrapper = waveRow.querySelector('.waveform-wrapper');
+    ch.waveformCanvas = waveRow.querySelector('canvas');
+    ch.waveformPh = waveRow.querySelector('.waveform-playhead');
+    addWaveformLabels(waveRow.querySelector('.waveform-labels') as HTMLElement, wfH);
+
+    // Spectrogram row
+    const specRow = document.createElement('div');
+    specRow.style.cssText = 'display:flex;min-height:0';
+    specRow.innerHTML =
+      '<div class="freq-labels" style="height:' + chH + 'px"></div>' +
+      '<div class="spec-wrapper" style="height:' + chH + 'px">' +
+      '<canvas height="' + chH + '"></canvas>' +
+      '<div class="playhead" style="left:0"></div>' +
+      '<div class="loading-overlay"><div class="spinner"></div>Rendering...</div>' +
+      '</div>';
+    laneEl.appendChild(specRow);
+
+    el.appendChild(laneEl);
+
+    ch.canvas = specRow.querySelector('canvas');
+    ch.wrapper = specRow.querySelector('.spec-wrapper');
+    ch.ph = specRow.querySelector('.playhead');
+    addFreqLabels(specRow.querySelector('.freq-labels') as HTMLElement, track.nyquist);
+    const loading = specRow.querySelector('.loading-overlay') as HTMLElement;
+
+    attachLaneInteractions(track, ch.canvas, ch.wrapper!, ch.waveformWrapper!);
+    loadings.push(loading);
+  }
+
+  const strip = document.createElement('div');
+  strip.className = 'analysis-strip empty';
+  strip.style.paddingLeft = '44px';
+  el.appendChild(strip);
+  track.analysisStrip = strip;
+
+  // Aggregate pending render over all channel lanes.
+  if (track.loaded) {
+    track._pendingRender = () => {
+      const first = track.chViews[0];
+      const w = first && first.wrapper ? first.wrapper.clientWidth : 0;
+      if (w > 0) {
+        for (const ch of track.chViews) {
+          if (ch.canvas) ch.canvas.width = w;
+          if (ch.waveformCanvas) ch.waveformCanvas.width = w;
+        }
+        setTimeout(() => {
+          for (let i = 0; i < track.chViews.length; i++) renderSpec(track, i);
+          if (waveformVisible) for (let i = 0; i < track.chViews.length; i++) drawWaveform(track, i);
+          for (const ld of loadings) if (ld.parentNode) ld.remove();
+        }, 0);
+      } else {
+        for (const ld of loadings) if (ld.parentNode) ld.remove();
+      }
+    };
+  } else {
+    for (const ld of loadings) {
+      ld.innerHTML = '<span style="color:#666;font-size:11px">Waiting to load…</span>';
+    }
+    track._pendingRender = null;
+  }
+
+  updateChannelListenUI(track);
+
+  return el;
+}
+
+function channelName(i: number): string {
+  if (i === 0) return 'Left';
+  if (i === 1) return 'Right';
+  return 'Channel ' + (i + 1);
+}
+
+/** Refresh mute button visual state for every lane of a multichannel track. */
+function updateChannelListenUI(t: Track): void {
+  const n = t.buffer.numberOfChannels;
+  for (let c = 0; c < n; c++) {
+    const mute = t.muteBtn[c];
+    if (mute) mute.classList.toggle('on', t.mutedCh.has(c));
+  }
+}
+
+/** Refresh the selected-channel highlight across lanes (activeCh). */
+function updateChannelActiveUI(t: Track): void {
+  for (let c = 0; c < t.chViews.length; c++) {
+    const el = t.chViews[c].labelEl;
+    if (!el) continue;
+    el.classList.toggle('selected', t.activeCh === c);
+  }
+}
+
+/** Point-select a channel lane: highlights it (does not alter audio routing). */
+function selectChannel(t: Track, c: number): void {
+  t.activeCh = c;
+  updateChannelActiveUI(t);
+}
+
+/**
+ * Bind seek / zoom / selection-drag interactions to one lane's canvas. All lanes
+ * operate on the shared track time axis (viewStart/viewEnd) so the geometry
+ * comes from the lane while zoom state lives on the track.
+ */
+function attachLaneInteractions(
+  track: Track,
+  canvas: HTMLCanvasElement | null,
+  wrapper: HTMLElement,
+  waveWrapper: HTMLElement
+): void {
+  if (!canvas) return;
+  const rectCanvas = (): DOMRect => canvas!.getBoundingClientRect();
+
   const seekHandler = (e: MouseEvent) => {
-    if ((track.wrapper as any)._wasDrag) { (track.wrapper as any)._wasDrag = false; return; }
-    const rect = track.canvas!.getBoundingClientRect();
+    if ((wrapper as any)._wasDrag) { (wrapper as any)._wasDrag = false; return; }
+    const rect = rectCanvas();
     const cx = e.clientX - rect.left;
     const ratio = Math.max(0, Math.min(1, cx / rect.width));
     const time = track.viewStart + ratio * (track.viewEnd - track.viewStart);
     selectAndSeek(track, time);
   };
-  track.wrapper!.addEventListener('click', seekHandler);
-  track.waveformWrapper!.addEventListener('click', seekHandler);
+  wrapper.addEventListener('click', seekHandler);
+  waveWrapper.addEventListener('click', seekHandler);
 
-  // Ctrl+wheel = zoom, plain wheel = horizontal scroll (when zoomed)
   const wheelHandler = (e: WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
-      const rect = track.canvas!.getBoundingClientRect();
+      const rect = rectCanvas();
       const mouseX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const factor = e.deltaY > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
       applyZoom(track, mouseX, factor);
@@ -332,31 +1172,16 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
       applyPan(track, shift);
     }
   };
-  track.wrapper!.addEventListener('wheel', wheelHandler, { passive: false });
-  track.waveformWrapper!.addEventListener('wheel', wheelHandler, { passive: false });
+  wrapper.addEventListener('wheel', wheelHandler, { passive: false });
+  waveWrapper.addEventListener('wheel', wheelHandler, { passive: false });
 
   // Shift+drag = selection zoom
   let dragStartX: number | null = null;
   let selBox: HTMLElement | null = null;
 
-  track.wrapper!.addEventListener('mousedown', e => {
-    if (e.shiftKey) {
-      e.preventDefault();
-      e.stopPropagation();
-      dragStartX = e.clientX;
-      selBox = document.createElement('div');
-      selBox.className = 'zoom-selection';
-      selBox.style.height = '100%';
-      track.wrapper!.appendChild(selBox);
-      // Register document listeners only during active drag
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
-    }
-  });
-
   const onMouseMove = (e: MouseEvent) => {
-    if (dragStartX === null || !selBox || !track.canvas) return;
-    const rect = track.canvas.getBoundingClientRect();
+    if (dragStartX === null || !selBox || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
     const left = Math.max(0, Math.min(dragStartX, e.clientX) - rect.left);
     const right = Math.min(rect.width, Math.max(dragStartX, e.clientX) - rect.left);
     selBox.style.left = left + 'px';
@@ -364,12 +1189,11 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
   };
 
   const onMouseUp = (e: MouseEvent) => {
-    // Always clean up listeners on mouseup to prevent leaks
     document.removeEventListener('mousemove', onMouseMove);
     document.removeEventListener('mouseup', onMouseUp);
 
     if (dragStartX === null) return;
-    const rect = track.canvas!.getBoundingClientRect();
+    const rect = canvas!.getBoundingClientRect();
     const x1 = Math.max(0, (Math.min(dragStartX, e.clientX) - rect.left) / rect.width);
     const x2 = Math.min(1, (Math.max(dragStartX, e.clientX) - rect.left) / rect.width);
     if (selBox) selBox.remove();
@@ -377,7 +1201,7 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
     dragStartX = null;
 
     if (x2 - x1 < 0.01) return; // too small
-    (track.wrapper as any)._wasDrag = true; // prevent click-to-seek
+    (wrapper as any)._wasDrag = true; // prevent click-to-seek
 
     const span = track.viewEnd - track.viewStart;
     const newStart = track.viewStart + x1 * span;
@@ -386,7 +1210,6 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
     syncGroupZoom(track);
     redrawTrack(track);
     updateRuler(track);
-    // Redraw siblings in group
     if (track.groupId != null) {
       const sibs = getSiblings(track);
       for (const s of sibs) {
@@ -396,6 +1219,23 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
     updatePlayheads();
   };
 
+  wrapper.addEventListener('mousedown', e => {
+    if (e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      dragStartX = e.clientX;
+      selBox = document.createElement('div');
+      selBox.className = 'zoom-selection';
+      selBox.style.height = '100%';
+      wrapper.appendChild(selBox);
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    }
+  });
+}
+
+/** Create the width-sync + deferred render callback shared by single & multi. */
+function wirePendingRender(track: Track, el: HTMLElement, loading: HTMLElement): void {
   if (track.loaded) {
     track._pendingRender = () => {
       const w = track.wrapper!.clientWidth;
@@ -423,7 +1263,6 @@ function buildSpecBody(track: Track, h: number): HTMLElement {
     }
     track._pendingRender = null;
   }
-  return el;
 }
 
 function niceStep(rawStep: number): number {
@@ -534,6 +1373,15 @@ function syncGroupZoom(track: Track): void {
 }
 
 function redrawTrack(track: Track): void {
+  if (!track.loaded) return;
+  if (isMultiTrack(track)) {
+    for (let i = 0; i < track.chViews.length; i++) {
+      const ch = track.chViews[i];
+      if (ch.canvas && ch.specData) drawSpec(track, i);
+      if (waveformVisible && ch.waveformCanvas) drawWaveform(track, i);
+    }
+    return;
+  }
   if (!track.canvas || !track.specData) return;
   drawSpec(track);
   if (waveformVisible && track.waveformCanvas) {
@@ -608,6 +1456,18 @@ export function moveToPrevCard(): void {
 export function setWaveformVisible(visible: boolean): void {
   waveformVisible = visible;
   for (const t of tracks) {
+    if (isMultiTrack(t)) {
+      for (let i = 0; i < t.chViews.length; i++) {
+        const ch = t.chViews[i];
+        if (ch.waveformRow) ch.waveformRow.style.display = visible ? 'flex' : 'none';
+        if (visible && ch.waveformCanvas && t.loaded) {
+          const w = ch.wrapper!.clientWidth;
+          if (w > 0) ch.waveformCanvas.width = w;
+          drawWaveform(t, i);
+        }
+      }
+      continue;
+    }
     if (t.waveformRow) {
       t.waveformRow.style.display = visible ? 'flex' : 'none';
     }
@@ -643,6 +1503,7 @@ function setActive(id: number): void {
   highlightActive();
   updateLaneHighlights();
   updateTimeDisplay();
+  refreshMetaWindow(); // group JSON follows the active lane
 }
 
 export function highlightActive(): void {
@@ -664,10 +1525,32 @@ export function updateLaneHighlights(): void {
 
 export function updatePlayheads(): void {
   for (const t of tracks) {
-    if (!t.canvas || !t.ph || !t.loaded) continue;
+    if (!t.loaded) continue;
     const pos = getPos(t);
     const span = t.viewEnd - t.viewStart;
-    if (pos < t.viewStart || pos > t.viewEnd) {
+    const visible = !(pos < t.viewStart || pos > t.viewEnd);
+    if (isMultiTrack(t)) {
+      for (const ch of t.chViews) {
+        if (!ch.canvas || !ch.ph) continue;
+        if (!visible) {
+          ch.ph.style.display = 'none';
+          if (ch.waveformPh) ch.waveformPh.style.display = 'none';
+        } else {
+          ch.ph.style.display = '';
+          const frac = (pos - t.viewStart) / span;
+          const px = frac * ch.wrapper!.clientWidth;
+          ch.ph.style.transform = 'translateX(' + px + 'px)';
+          if (ch.waveformPh) {
+            ch.waveformPh.style.display = '';
+            const wfPx = ch.waveformWrapper ? frac * ch.waveformWrapper.clientWidth : px;
+            ch.waveformPh.style.transform = 'translateX(' + wfPx + 'px)';
+          }
+        }
+      }
+      continue;
+    }
+    if (!t.canvas || !t.ph) continue;
+    if (!visible) {
       t.ph.style.display = 'none';
       if (t.waveformPh) t.waveformPh.style.display = 'none';
     } else {
@@ -841,6 +1724,7 @@ function findExistingStandaloneByStem(stem: string): Track | null {
   const key = stem.toLowerCase();
   for (const t of tracks) {
     if (t.groupId != null) continue;
+    if (t.isMulti) continue; // multichannel tracks never join groups
     const { stem: tStem } = extractTag(stripExt(t.name));
     if (tStem.toLowerCase() === key) return t;
   }
@@ -892,11 +1776,28 @@ function createStandalone(name: string, buffer: AudioBuffer | null, nativeSR: nu
     '<button class="card-remove" title="Remove">&times;</button>';
   hdr.addEventListener('click', () => setActive(t.id));
   hdr.querySelector('.card-remove')!.addEventListener('click', e => { e.stopPropagation(); removeTrack(t.id); });
-  hdr.querySelector('.btn-analyze')!.addEventListener('click', e => { e.stopPropagation(); runAnalysis(t); });
+  hdr.querySelector('.btn-analyze')!.addEventListener('click', e => { e.stopPropagation(); toggleAnalyze(t); });
   t.analyzeBtn = hdr.querySelector('.btn-analyze');
   card.appendChild(hdr);
-  card.appendChild(buildSpecBody(t, SPEC_H));
-  card.appendChild(buildRuler(t));
+
+  // Body row: audio (left) + paired JSON metadata (right, toggleable)
+  const row = document.createElement('div');
+  row.className = 'card-row';
+  const left = document.createElement('div');
+  left.className = 'card-left';
+  left.appendChild(buildSpecBody(t, SPEC_H));
+  left.appendChild(buildRuler(t));
+  row.appendChild(left);
+  const panel = buildMetaPanel();
+  const resizer = makeMetaResizer(row, () => { refreshMetaWindow(); reflowSpectrograms(); });
+  row.appendChild(resizer);
+  row.appendChild(panel.aside);
+  card.appendChild(row);
+  t.metaPanel = panel;
+  t.meta = metaMap.get(metaKeyOf(name, filePath)) || metaMap.get(metaKeyOf(name)) || null;
+  setMetaBody(panel.body, t.meta);
+  if (metaVisible) panel.aside.classList.add('show');
+
   tracksBox.appendChild(card);
   t.el = card;
   tracks.push(t);
@@ -955,7 +1856,7 @@ function createDiffGroup(baseName: string, items: DecodedItem[]): HTMLElement {
       '<span class="diff-lane-playing"></span>' +
       '<button class="lane-remove" title="Remove this track">&times;</button>';
     lbl.addEventListener('click', () => { setActive(t.id); updateLaneHighlights(); });
-    lbl.querySelector('.btn-analyze')!.addEventListener('click', e => { e.stopPropagation(); runAnalysis(t); });
+    lbl.querySelector('.btn-analyze')!.addEventListener('click', e => { e.stopPropagation(); toggleAnalyze(t); });
     lbl.querySelector('.lane-remove')!.addEventListener('click', e => { e.stopPropagation(); deleteTrackFromGroup(t.id); });
     t.analyzeBtn = lbl.querySelector('.btn-analyze');
     lane.appendChild(lbl);
@@ -971,11 +1872,31 @@ function createDiffGroup(baseName: string, items: DecodedItem[]): HTMLElement {
     if (!activeTrackId) activeTrackId = t.id;
   });
 
-  card.appendChild(cols);
+  // Body row: diff columns (left) + active-lane JSON metadata (right)
+  const row = document.createElement('div');
+  row.className = 'card-row';
+  const left = document.createElement('div');
+  left.className = 'card-left';
+  left.appendChild(cols);
+  row.appendChild(left);
+  const panel = buildMetaPanel();
+  const resizer = makeMetaResizer(row, () => { refreshMetaWindow(); reflowSpectrograms(); });
+  row.appendChild(resizer);
+  row.appendChild(panel.aside);
+  card.appendChild(row);
 
   tracksBox.appendChild(card);
-  groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card });
+  groups.push({ id: gid, baseName, trackIds: grpTracks.map(t => t.id), el: card, metaPanel: panel });
   updateLaneHighlights();
+
+  // Attach meta to each lane from the map (same stem matching), then show the
+  // active lane's JSON in the shared panel.
+  for (const t of grpTracks) {
+    t.meta = metaMap.get(metaKeyOf(t.name, t.filePath)) || metaMap.get(metaKeyOf(t.name)) || null;
+  }
+  const activeLane = getActiveLaneOfGroup(groups[groups.length - 1]);
+  setMetaBody(panel.body, activeLane ? activeLane.meta : null);
+  if (metaVisible) panel.aside.classList.add('show');
 
   if (grpTracks.some(t => t.loaded)) {
     requestAnimationFrame(() => {
@@ -1129,9 +2050,23 @@ export function refreshUI(): void {
   btnZoomOut.disabled = !has;
   btnZoomFit.disabled = !has;
   btnAnalyzeAll.disabled = !has;
+  updateGroupingUI();
   highlightActive();
   updateLaneHighlights();
   updateTimeDisplay();
+}
+
+/** Toggle a per-track analysis result strip between expanded / collapsed. If
+ *  the track has no analysis yet, kicks off the classification run instead. */
+function toggleAnalyze(t: Track): void {
+  if (t.analysisResults) {
+    t.analysisCollapsed = !t.analysisCollapsed;
+    if (t.analysisStrip) t.analysisStrip.classList.toggle('empty', !!t.analysisCollapsed);
+    if (t.analyzeBtn) t.analyzeBtn.textContent = t.analysisCollapsed ? 'Show Tags' : 'Hide Tags';
+    if (!t.analysisCollapsed) renderAnalysisStrip(t);
+  } else {
+    runAnalysis(t);
+  }
 }
 
 function computeDisplayNames(items: DecodedItem[]): void {
@@ -1155,10 +2090,27 @@ function computeDisplayNames(items: DecodedItem[]): void {
   }
 }
 
-export function handleFiles(items: DecodedItem[]): (HTMLElement | null)[] {
-  const grouped = groupByBaseName(items);
-  const els: (HTMLElement | null)[] = [];
+/** Partition incoming items for rendering: group by stem when auto-grouping is
+ *  enabled, otherwise keep every file on its own (no diff groups are formed). */
+function groupItems(items: DecodedItem[]): GroupResult[] {
+  if (autoGroup) return groupByBaseName(items);
+  return items.map(it => ({ baseName: it.name, items: [it] }));
+}
 
+export function handleFiles(items: DecodedItem[]): (HTMLElement | null)[] {
+  const els: (HTMLElement | null)[] = [];
+  const rest: DecodedItem[] = [];
+  for (const it of items) {
+    // Multichannel files (any ch>1) are never grouped — always standalone.
+    if (it.buffer && it.buffer.numberOfChannels > 1) {
+      els.push(createStandalone(it.name, it.buffer, it.nativeSR, it.filePath, it.lazyUri));
+    } else {
+      rest.push(it);
+    }
+  }
+  if (rest.length === 0) { refreshUI(); return els; }
+
+  const grouped = groupItems(rest);
   for (const grp of grouped) {
     let el: HTMLElement | null = null;
     if (grp.items.length >= 2) {
@@ -1193,44 +2145,49 @@ export function handleFiles(items: DecodedItem[]): (HTMLElement | null)[] {
       if (ph) placeCardAtPosition(ph);
     } else {
       const newItem = grp.items[0];
-      const { stem, tag } = extractTag(stripExt(newItem.name));
-      const existingMatch = findExistingStandaloneByStem(stem);
-
-      if (existingMatch && tag) {
-        // Known tag: merge with existing standalone
-        const oldTrack = existingMatch;
-        const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
-        const ph = insertPlaceholderBefore(oldTrack.el);
-        removeTrackQuietly(oldTrack.id);
-        const mergeItems: DecodedItem[] = [
-          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath, lazyUri: oldTrack.lazyUri },
-          { ...newItem, suffix: tag },
-        ];
-        computeDisplayNames(mergeItems);
-        el = createDiffGroup(stem, mergeItems);
-        placeCardAtPosition(ph);
-      } else if (existingMatch && newItem.filePath && existingMatch.filePath !== newItem.filePath) {
-        // No known tag, but same stem and different directories — same-name different-dir merge
-        const oldTrack = existingMatch;
-        const ph = insertPlaceholderBefore(oldTrack.el);
-        removeTrackQuietly(oldTrack.id);
-        const mergeItems: DecodedItem[] = [
-          { name: oldTrack.name, buffer: oldTrack.buffer, suffix: getParentFolderName(oldTrack.filePath || ''), nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath, lazyUri: oldTrack.lazyUri },
-          { ...newItem, suffix: getParentFolderName(newItem.filePath) },
-        ];
-        computeDisplayNames(mergeItems);
-        el = createDiffGroup(stem, mergeItems);
-        placeCardAtPosition(ph);
+      if (!autoGroup) {
+        // Auto-grouping disabled: never merge, always a standalone card.
+        el = createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.filePath, newItem.lazyUri);
       } else {
-        const existingGroup = findExistingGroupByStem(stem);
-        if (existingGroup && tag) {
-          // Known tag — add to existing group
-          el = addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
-        } else if (existingGroup) {
-          // No known tag — add with parent folder name as suffix
-          el = addToDiffGroup(existingGroup, { ...newItem, suffix: newItem.filePath ? getParentFolderName(newItem.filePath) : undefined });
+        const { stem, tag } = extractTag(stripExt(newItem.name));
+        const existingMatch = findExistingStandaloneByStem(stem);
+
+        if (existingMatch && tag) {
+          // Known tag: merge with existing standalone
+          const oldTrack = existingMatch;
+          const oldTag = extractTag(stripExt(oldTrack.name)).tag || oldTrack.name;
+          const ph = insertPlaceholderBefore(oldTrack.el);
+          removeTrackQuietly(oldTrack.id);
+          const mergeItems: DecodedItem[] = [
+            { name: oldTrack.name, buffer: oldTrack.buffer, suffix: oldTag, nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath, lazyUri: oldTrack.lazyUri },
+            { ...newItem, suffix: tag },
+          ];
+          computeDisplayNames(mergeItems);
+          el = createDiffGroup(stem, mergeItems);
+          placeCardAtPosition(ph);
+        } else if (existingMatch && newItem.filePath && existingMatch.filePath !== newItem.filePath) {
+          // No known tag, but same stem and different directories — same-name different-dir merge
+          const oldTrack = existingMatch;
+          const ph = insertPlaceholderBefore(oldTrack.el);
+          removeTrackQuietly(oldTrack.id);
+          const mergeItems: DecodedItem[] = [
+            { name: oldTrack.name, buffer: oldTrack.buffer, suffix: getParentFolderName(oldTrack.filePath || ''), nativeSR: oldTrack.nativeSR, filePath: oldTrack.filePath, lazyUri: oldTrack.lazyUri },
+            { ...newItem, suffix: getParentFolderName(newItem.filePath) },
+          ];
+          computeDisplayNames(mergeItems);
+          el = createDiffGroup(stem, mergeItems);
+          placeCardAtPosition(ph);
         } else {
-          el = createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.filePath, newItem.lazyUri);
+          const existingGroup = findExistingGroupByStem(stem);
+          if (existingGroup && tag) {
+            // Known tag — add to existing group
+            el = addToDiffGroup(existingGroup, { ...newItem, suffix: tag });
+          } else if (existingGroup) {
+            // No known tag — add with parent folder name as suffix
+            el = addToDiffGroup(existingGroup, { ...newItem, suffix: newItem.filePath ? getParentFolderName(newItem.filePath) : undefined });
+          } else {
+            el = createStandalone(newItem.name, newItem.buffer, newItem.nativeSR, newItem.filePath, newItem.lazyUri);
+          }
         }
       }
     }
@@ -1253,6 +2210,8 @@ export function handleFiles(items: DecodedItem[]): (HTMLElement | null)[] {
 const INITIAL_RENDER = 10;
 const SCROLL_BATCH = 30;
 const MAX_RENDERED = 500;
+const REGROUP_CHUNK = 4;      // diff-group cards materialized per frame during grouping toggle
+const REGROUP_PAUSE = 0;      // ms between chunks (yields main thread)
 
 interface WindowGroup { baseName: string; items: DecodedItem[]; }
 interface WindowRec { group: WindowGroup; el: HTMLElement | null; }
@@ -1400,8 +2359,14 @@ export function handleFileURIs(files: { name: string; uri: string }[]): void {
     filePath: f.uri,   // URI string used for directory-based grouping
     lazyUri: f.uri,
   }));
-  const combined = pendingGroups.flatMap(g => g.items).concat(newItems);
-  pendingGroups = groupByBaseName(combined).map(g => ({ baseName: g.baseName, items: g.items }));
+  if (autoGroup) {
+    const combined = pendingGroups.flatMap(g => g.items).concat(newItems);
+    pendingGroups = groupByBaseName(combined).map(g => ({ baseName: g.baseName, items: g.items }));
+  } else {
+    // Auto-grouping disabled: each lazy file becomes its own group so nothing
+    // ever merges into a diff group.
+    pendingGroups = pendingGroups.concat(newItems.map(f => ({ baseName: f.name, items: [f] })));
+  }
   renderWindow(INITIAL_RENDER);
   updateSentinels();
 }
@@ -1416,6 +2381,13 @@ export function clearAll(): void {
   pendingGroups = [];
   renderedCards = [];
   releasedTop = [];
+  // standalone JSON cards are cleared too
+  for (const c of jsonCards) if (c.card) c.card.remove();
+  jsonCards.length = 0;
+  metaMap.clear();
+  metaSource.clear();
+  metaTreeCache.clear();
+  metaLeafCache.clear();
   loadQueue.length = 0;
   activeLoads = 0;
   lazyObserver.disconnect();
@@ -1425,18 +2397,250 @@ export function clearAll(): void {
   refreshUI();
 }
 
+/** Restore the original basename for a track, since computeDisplayNames() may
+ *  have rewritten t.name to a relative path for cross-directory display. */
+function itemBaseName(t: Track): string {
+  if (!t.filePath) return t.name;
+  if (t.filePath.startsWith('tar:')) {
+    // tar format: "tar:archivePath\ninternalName"
+    const nlIdx = t.filePath.indexOf('\n');
+    if (nlIdx >= 0) {
+      const internalName = t.filePath.substring(nlIdx + 1);
+      return internalName.split('/').pop() || t.name;
+    }
+    return t.name;
+  }
+  const normalized = t.filePath.replace(/\\/g, '/');
+  return normalized.substring(normalized.lastIndexOf('/') + 1) || t.name;
+}
+
+/** Restore the analysis state captured before a rebuild/split onto a track
+ *  that was just re-created, so the classification tags survive regrouping. */
+function restoreTrackAnalysis(
+  t: Track,
+  backup: Map<string, { results: AnalysisSpan[]; collapsed: boolean }>
+): void {
+  const key = t.lazyUri || t.filePath || t.name;
+  const snap = backup.get(key);
+  if (!snap || !t.analysisStrip) return;
+  t.analysisResults = snap.results;
+  t.analysisCollapsed = snap.collapsed;
+  if (snap.collapsed) {
+    t.analysisStrip.classList.add('empty');
+    if (t.analyzeBtn) t.analyzeBtn.textContent = 'Show Tags';
+  } else {
+    renderAnalysisStrip(t);
+    if (t.analyzeBtn) t.analyzeBtn.textContent = 'Hide Tags';
+  }
+}
+
+/** Snapshot per-track analysis results keyed by lazyUri/filePath/name so that
+ *  a clearAll + rebuild (which recreates tracks) can restore the tags. */
+function snapshotAnalysis(): Map<string, { results: AnalysisSpan[]; collapsed: boolean }> {
+  const m = new Map<string, { results: AnalysisSpan[]; collapsed: boolean }>();
+  for (const t of tracks) {
+    if (!t.analysisResults || !t.analysisResults.length) continue;
+    const key = t.lazyUri || t.filePath || t.name;
+    m.set(key, { results: t.analysisResults, collapsed: !!t.analysisCollapsed });
+  }
+  return m;
+}
+
+/** Collect every source of data — live tracks plus pending/recycled window
+ *  groups (whose cards have been removed from tracks[]) — de-duplicated by
+ *  lazyUri/filePath/name. */
+function collectAllItems(): DecodedItem[] {
+  const byKey = new Map<string, DecodedItem>();
+  const addItem = (item: DecodedItem): void => {
+    const key = item.lazyUri || item.filePath || item.name;
+    if (key && !byKey.has(key)) byKey.set(key, item);
+  };
+  for (const t of tracks) {
+    addItem({
+      name: itemBaseName(t),
+      buffer: t.buffer || null,
+      nativeSR: t.nativeSR,
+      filePath: t.filePath,
+      lazyUri: t.lazyUri,
+    });
+  }
+  for (const g of pendingGroups) for (const it of g.items) addItem(it);
+  for (const r of releasedTop) for (const it of r.group.items) addItem(it);
+  return Array.from(byKey.values());
+}
+
+function sortItems(items: DecodedItem[]): DecodedItem[] {
+  return items.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+/** off → on: re-join currently-visible standalone cards into diff groups *in
+ *  place* (the mirror of splitAllGroups). Cards are never cleared or rebuilt as
+ *  a whole: only members of a stem that forms a group are removed from their
+ *  standalone card and re-created as one group card at the same DOM position.
+ *  Because the same AudioBuffer objects are reused, renderSpec hits the
+ *  per-buffer spec cache and no FFT is recomputed — the spectrum does not
+ *  disappear and the UI never blocks on a full rebuild.
+ */
+function rebuildAll(): void {
+  // Multichannel files never join diff groups, so they are excluded both from
+  // the standalone pool and from grouping below.
+  const standalones = tracks.filter(t => t.groupId == null && !!t.buffer && !t.isMulti);
+  if (standalones.length === 0) { groupingBusy = false; updateGroupingUI(); return; }
+  const backup = snapshotAnalysis();
+
+  // Index each current standalone card by its dedup key so we can map the
+  // grouped items back onto the exact DOM cards they came from.
+  const byKey = new Map<string, Track>();
+  for (const t of standalones) {
+    const key = t.lazyUri || t.filePath || t.name;
+    if (key) byKey.set(key, t);
+  }
+
+  const items: DecodedItem[] = standalones.map(t => ({
+    name: itemBaseName(t), buffer: t.buffer, nativeSR: t.nativeSR,
+    filePath: t.filePath, lazyUri: t.lazyUri,
+  }));
+  const plans: { stem: string; items: DecodedItem[]; cardEls: HTMLElement[] }[] = [];
+  for (const g of groupByBaseName(items)) {
+    if (g.items.length < 2) continue; // single-file stem stays as-is
+    const cardEls: HTMLElement[] = [];
+    let ok = true;
+    for (const it of g.items) {
+      const key = it.lazyUri || it.filePath || it.name;
+      const tr = key ? byKey.get(key) : undefined;
+      if (!tr || !tr.el) { ok = false; break; }
+      cardEls.push(tr.el);
+    }
+    if (!ok) continue; // be conservative: skip stems we cannot fully map
+    plans.push({ stem: g.baseName, items: g.items, cardEls });
+  }
+  if (plans.length === 0) { groupingBusy = false; updateGroupingUI(); return; }
+
+  let idx = 0;
+  let alive = true;
+  const finish = (): void => {
+    alive = false;
+    groupingBusy = false;
+    refreshUI();
+    updateGroupingUI();
+  };
+  const step = (): void => {
+    if (!alive) return;
+    try {
+      let done = 0;
+      while (idx < plans.length && done < REGROUP_CHUNK) {
+        const plan = plans[idx++];
+        done++;
+        const anchor = insertPlaceholderBefore(plan.cardEls[0]);
+        for (const el of plan.cardEls) {
+          const tr = tracks.find(x => x.el === el);
+          if (tr) removeTrackQuietly(tr.id);
+        }
+        const el = createDiffGroup(plan.stem, plan.items);
+        placeCardAtPosition(anchor);
+        const g = groups.find(x => x.el === el);
+        if (g) {
+          for (const tid of g.trackIds) {
+            const t = tracks.find(x => x.id === tid);
+            if (t) restoreTrackAnalysis(t, backup);
+          }
+        }
+      }
+      if (idx < plans.length && groupingBusy) {
+        window.setTimeout(step, REGROUP_PAUSE);
+        return;
+      }
+    } catch (e) {
+      console.error('rebuildAll chunk error:', e);
+    }
+    finish();
+  };
+  groupingBusy = true;
+  window.setTimeout(step, REGROUP_PAUSE);
+}
+
+/** on → off: split every existing diff-group card into individual standalone
+ *  cards, in place (the member cards stay at the group's original position).
+ *  Standalone cards that were never grouped are left untouched. Chunked the same
+ *  way as rebuildAll so splitting many groups does not block the UI. */
+function splitAllGroups(): void {
+  if (groups.length === 0) { groupingBusy = false; updateGroupingUI(); return; }
+  const backup = snapshotAnalysis();
+  const gs = groups.slice();
+  let idx = 0;
+  let alive = true;
+  const finish = (): void => {
+    alive = false;
+    groupingBusy = false;
+    refreshUI();
+    updateGroupingUI();
+  };
+  const step = (): void => {
+    if (!alive) return;
+    try {
+      let done = 0;
+      while (idx < gs.length && done < REGROUP_CHUNK) {
+        const grp = gs[idx++];
+        if (!groups.some(g => g.id === grp.id)) continue; // already removed meanwhile
+        done++;
+        const members = grp.trackIds
+          .map(id => tracks.find(t => t.id === id))
+          .filter((t): t is Track => !!t)
+          .map(t => ({ name: itemBaseName(t), buffer: t.buffer || null, nativeSR: t.nativeSR, filePath: t.filePath, lazyUri: t.lazyUri }));
+        const anchor = grp.el.nextSibling;
+        removeDiffGroupQuietly(grp.id);
+        for (const it of members) {
+          const card = createStandalone(it.name, it.buffer, it.nativeSR, it.filePath, it.lazyUri);
+          const t = tracks.find(x => x.el === card);
+          if (t) restoreTrackAnalysis(t, backup);
+          if (anchor && anchor.parentNode === tracksBox) tracksBox.insertBefore(card, anchor);
+        }
+      }
+      if (idx < gs.length && groupingBusy) {
+        window.setTimeout(step, REGROUP_PAUSE);
+        return;
+      }
+    } catch (e) {
+      console.error('splitAllGroups chunk error:', e);
+    }
+    finish();
+  };
+  groupingBusy = true;
+  window.setTimeout(step, REGROUP_PAUSE);
+}
+
+/** Toggle auto-grouping. Switching back on rebuilds all groupings; switching
+ *  off splits current groups in place. */
+export function toggleAutoGroup(): void {
+  if (groupingBusy) return; // ignore clicks while a regroup/split is running
+  autoGroup = !autoGroup;
+  updateGroupingUI();
+  if (autoGroup) rebuildAll();
+  else splitAllGroups();
+}
+
+function updateGroupingUI(): void {
+  if (!btnGrouping) return;
+  btnGrouping.disabled = tracks.length === 0 || groupingBusy;
+  btnGrouping.textContent = groupingBusy ? 'Working…' : (autoGroup ? 'Grouping: On' : 'Grouping: Off');
+  btnGrouping.classList.toggle('active', autoGroup);
+}
+
 export function initUI(): void {
   dropZone = document.getElementById('drop-zone')!;
   tracksBox = document.getElementById('tracks-container')!;
   btnPlay = document.getElementById('btn-play') as HTMLButtonElement;
   btnStop = document.getElementById('btn-stop') as HTMLButtonElement;
   btnAnalyzeAll = document.getElementById('btn-analyze-all') as HTMLButtonElement;
+  btnGrouping = document.getElementById('btn-grouping') as HTMLButtonElement;
   btnZoomIn = document.getElementById('btn-zoom-in') as HTMLButtonElement;
   btnZoomOut = document.getElementById('btn-zoom-out') as HTMLButtonElement;
   btnZoomFit = document.getElementById('btn-zoom-fit') as HTMLButtonElement;
   timeDisp = document.getElementById('time-display')!;
   playIcon = document.getElementById('play-icon')!;
   playLabel = document.getElementById('play-label')!;
+
+  btnGrouping.addEventListener('click', toggleAutoGroup);
 
   sentinelObserver = new IntersectionObserver(entries => {
     if (entries.some(e => e.isIntersecting)) renderWindow(SCROLL_BATCH);
@@ -1445,5 +2649,58 @@ export function initUI(): void {
     if (entries.some(e => e.isIntersecting)) drainTop();
   }, { root: tracksBox, rootMargin: '2000px 0px' });
 
+  // Meta width restore + interactions
+  try { const saved = localStorage.getItem('specview-meta-width'); if (saved) document.documentElement.style.setProperty('--meta-width', saved); } catch { /* ignore */ }
+  document.addEventListener('click', e => {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains('js-meta-key') || target.classList.contains('meta-sel-lbl')) {
+      const p = target.getAttribute('data-path');
+      if (p) toggleMetaKey(p);
+      return;
+    }
+    if (metaPopEl && !metaPopEl.contains(target) && !target.classList.contains('meta-pill')) closeMetaPop();
+  });
+  tracksBox.addEventListener('scroll', () => { requestAnimationFrame(refreshMetaWindow); }, { passive: true });
+
   refreshUI();
+
+  // Window resize: debounced reflow keeps canvas backing widths in sync with
+  // the layout, redrawing from the cached spec data (no FFT recompute). Both
+  // single-view tracks and multichannel lane tracks are handled.
+  let resizeTimer: number | undefined;
+  window.addEventListener('resize', () => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(reflowSpectrograms, 150);
+  });
+}
+
+/** Re-sync every loaded track's canvas backing width to its wrapper's current
+ *  layout width, then re-draw from the cached spectrum (no FFT recompute).
+ *  Used after the JSON panel toggles or is resized, since those layout changes
+ *  do not fire a window resize event. */
+function reflowSpectrograms(): void {
+  for (const t of tracks) {
+    if (!t.loaded) continue;
+    if (isMultiTrack(t)) {
+      for (const ch of t.chViews) {
+        const w = ch.wrapper ? ch.wrapper.clientWidth : 0;
+        if (w <= 0 || !ch.canvas || w === ch.canvas.width) continue;
+        ch.canvas.width = w;
+        if (ch.waveformCanvas) ch.waveformCanvas.width = w;
+      }
+      redrawTrack(t);
+      updateRuler(t);
+      continue;
+    }
+    const w = t.wrapper ? t.wrapper.clientWidth : 0;
+    if (w <= 0 || !t.canvas || w === t.canvas.width) continue;
+    t.canvas.width = w;
+    if (t.waveformCanvas) t.waveformCanvas.width = w;
+    if (t.specData) {
+      drawSpec(t);
+      if (waveformVisible && t.waveformCanvas) drawWaveform(t);
+    }
+    updateRuler(t);
+  }
+  updatePlayheads();
 }

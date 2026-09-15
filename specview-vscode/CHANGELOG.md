@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.1.4
+## 0.2.0
 
 ### New Features
 
 - **Windowed / virtualized lazy loading** — large file sets are no longer gated behind "Load more" clicks. Only a bounded window of cards is rendered; a scroll sentinel reveals more as you scroll (infinite scroll), cards that scroll far off-screen are recycled, and scrolling back up restores them. DOM stays small even with thousands of files.
 - **Fast PCM WAV decoding** — plain `.wav` files are decoded with a native-rate RIFF/PCM path instead of `decodeAudioData`, making webdataset-style archives decode much faster (and preserves the source sample rate).
+- **Paired JSON metadata panel** — a `.json` file next to an audio file (same stem) is matched up and shown in a metadata panel to the right of each track card and diff group. Click any JSON key to add it to a multi-field comparison across all loaded files; the **fields** pill opens a searchable field browser. The panel width is adjustable via a drag handle.
+- **Standalone JSON cards** — `.json` files with no matching audio are rendered as their own cards (full JSON view with the same field-selection behavior). They participate in removal / Clear All and are hidden while the JSON toggle is off.
+- **JSON & Grouping toolbar toggles** — a **JSON** checkbox shows/hides all metadata panels (and standalone JSON cards); a **Grouping** button turns automatic A/B diff grouping on/off.
+- **Multichannel per-channel display** — stereo and multichannel files (2–8 channels) are expanded into one lane per channel, each with its own waveform, spectrogram, and a **Mute** button. Playback mixes all channels by default and supports muting any combination of channels.
+- **Absolute full-scale normalization** — the spectrogram scale top is clamped to full scale (`20*log10(FFT_SIZE/4)` dB) instead of normalizing each file to its own peak, so quiet / near-silent files stay dark instead of having their noise floor stretched to full brightness.
+
+### Bug Fixes
+
+- Fixed frequency-axis (y-axis) labels missing on lacy-loaded playback cards. Frequency ticks are now populated once the real sample rate is known, scoped to the track's own lanes so diff-group siblings are not crossed.
+- Fixed the spectrogram canvas not re-scaling after the JSON panel is toggled open/closed or dragged wider/narrower. Canvas backing widths are now re-synced and redrawn (from the cached STFT) on those layout changes.
 
 ## 0.1.3
 

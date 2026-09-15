@@ -235,7 +235,7 @@ function postProcessAnalysis(chunkResults: { startSec: number; endSec: number; l
   return spans;
 }
 
-function renderAnalysisStrip(track: Track): void {
+export function renderAnalysisStrip(track: Track): void {
   const strip = track.analysisStrip;
   const spans = track.analysisResults;
   if (!strip || !spans || !spans.length) {

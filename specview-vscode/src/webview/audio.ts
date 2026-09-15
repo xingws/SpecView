@@ -20,6 +20,30 @@ export function setVolume(v: number): void {
   if (gainNode) gainNode.gain.value = v;
 }
 
+/** Routing nodes created for a per-channel mute play, so stopSource can
+ *  disconnect them and prevent leaks. */
+interface RouteNodes {
+  split: ChannelSplitterNode;
+  gains: GainNode[];
+}
+
+const activeRoutes = new WeakMap<AudioBufferSourceNode, RouteNodes>();
+
+/** Per-channel gain (0/1) for a track, driven by mute state. Returns null only
+ *  for mono buffers (direct connect is fine). 2+ channel buffers always go
+ *  through the splitter/mixer route so every channel's samples sum into the
+ *  mix (WebAudio's stereo up-mix duplicates mono to both ears) instead of a
+ *  stereo buffer mapping L→L, R→R. */
+function channelGains(t: Track): number[] | null {
+  const n = t.buffer.numberOfChannels;
+  if (n <= 1) return null;
+  const g: number[] = [];
+  for (let c = 0; c < n; c++) {
+    g.push(t.mutedCh.has(c) ? 0 : 1);
+  }
+  return g;
+}
+
 export function playSource(t: Track, from: number): void {
   if (!t.buffer) return;
   if (t.playing) stopSource(t);
@@ -27,7 +51,27 @@ export function playSource(t: Track, from: number): void {
   t.startTime = audioCtx.currentTime;
   const src = audioCtx.createBufferSource();
   src.buffer = t.buffer;
-  src.connect(gainNode);
+
+  const gains = channelGains(t);
+  if (gains) {
+    // Route each channel through its own GainNode so mute really changes
+    // what is audible. ChannelSplitter outputs are mono; they sum at gainNode.
+    const n = t.buffer.numberOfChannels;
+    const split = audioCtx.createChannelSplitter(n);
+    const chGains: GainNode[] = [];
+    for (let c = 0; c < n; c++) {
+      const g = audioCtx.createGain();
+      g.gain.value = gains[c];
+      split.connect(g, c);
+      g.connect(gainNode);
+      chGains.push(g);
+    }
+    src.connect(split);
+    activeRoutes.set(src, { split, gains: chGains });
+  } else {
+    src.connect(gainNode);
+  }
+
   src.start(0, from);
   t.source = src;
   t.playing = true;
@@ -39,6 +83,13 @@ export function playSource(t: Track, from: number): void {
       t.playing = false;
       t.source = null;
     }
+    const route = activeRoutes.get(src);
+    if (route) {
+      activeRoutes.delete(src);
+      try { src.disconnect(); } catch { /* ignore */ }
+      try { route.split.disconnect(); } catch { /* ignore */ }
+      for (const g of route.gains) { try { g.disconnect(); } catch { /* ignore */ } }
+    }
   };
 }
 
@@ -46,8 +97,26 @@ export function stopSource(t: Track): void {
   if (!t.playing) return;
   t.offset = Math.min(t.offset + audioCtx.currentTime - t.startTime, t.duration);
   try { t.source!.stop(); } catch { /* ignore */ }
+  if (t.source) {
+    const route = activeRoutes.get(t.source);
+    if (route) {
+      activeRoutes.delete(t.source);
+      try { t.source.disconnect(); } catch { /* ignore */ }
+      try { route.split.disconnect(); } catch { /* ignore */ }
+      for (const g of route.gains) { try { g.disconnect(); } catch { /* ignore */ } }
+    }
+  }
   t.source = null;
   t.playing = false;
+}
+
+/** Rebuild the audio route when mute state changed during playback. */
+export function applyChannelListen(t: Track): void {
+  if (!t.buffer || t.buffer.numberOfChannels <= 1) return;
+  if (t.playing) {
+    const pos = Math.min(t.offset + audioCtx.currentTime - t.startTime, t.duration);
+    playSource(t, pos);
+  }
 }
 
 export function getPos(t: Track): number {

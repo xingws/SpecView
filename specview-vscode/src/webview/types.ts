@@ -21,7 +21,10 @@ export interface Track {
   source: AudioBufferSourceNode | null;
   groupId: number | null;
   el: HTMLElement | null;
+  meta?: string | null;         // paired .json raw text (metadata panel)
+  metaPanel?: { aside: HTMLElement; body: HTMLElement; head: HTMLElement } | null;
   analysisResults: AnalysisSpan[] | null;
+  analysisCollapsed?: boolean;  // when true the analysis tag strip is hidden
   filePath?: string;   // full path, for same-name different-directory grouping
   lazyUri?: string;    // webview-accessible URI for lazy-loaded tracks
   _loading?: boolean;  // prevents concurrent load requests
@@ -41,6 +44,41 @@ export interface Track {
   waveformWrapper: HTMLElement | null;
   waveformRow: HTMLElement | null;
   waveformPh: HTMLElement | null;
+  // Multichannel expansion: when this track is displayed as per-channel lanes
+  // (numberOfChannels in [2..8] and not part of a diff group), chViews holds one
+  // entry per channel with its own canvas + spec cache + DOM refs. Empty [] for
+  // mono/single-view tracks (the fields above remain the single-view lane).
+  isMulti: boolean;
+  chViews: ChannelView[];
+  // Per-channel listen controls (multichannel tracks only): mutedCh = set of
+  // muted channel indices. activeCh = last clicked channel (used only for
+  // highlight).
+  mutedCh: Set<number>;
+  activeCh: number | null;
+  // DOM buttons for the label row's M controls, per channel.
+  muteBtn: (HTMLButtonElement | null)[];
+}
+
+/** One channel lane of a multichannel track. Mirrors the single-view fields so
+ *  the render pipeline can treat it interchangeably with a Track. */
+export interface ChannelView {
+  chIndex: number;
+  canvas: HTMLCanvasElement | null;
+  wrapper: HTMLElement | null;
+  ph: HTMLElement | null;
+  waveformCanvas: HTMLCanvasElement | null;
+  waveformWrapper: HTMLElement | null;
+  waveformRow: HTMLElement | null;
+  waveformPh: HTMLElement | null;
+  // Cached STFT data for this channel
+  specData: Float32Array | null;
+  specFrames: number;
+  specHop: number;
+  specH: number;
+  specMaxBin: number;
+  specGlobalPeak: number;
+  // label row DOM (channel tag + mute control)
+  labelEl: HTMLElement | null;
 }
 
 export interface Group {
@@ -48,6 +86,7 @@ export interface Group {
   baseName: string;
   trackIds: number[];
   el: HTMLElement;
+  metaPanel?: { aside: HTMLElement; body: HTMLElement; head: HTMLElement } | null;
 }
 
 export interface AnalysisSpan {
@@ -65,6 +104,7 @@ export interface DecodedItem {
   nativeSR: number;
   suffix?: string;
   lazyUri?: string;    // for lazy tracks that haven't been loaded yet
+  meta?: string | null; // paired .json raw text
 }
 
 export interface GroupResult {

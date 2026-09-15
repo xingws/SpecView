@@ -43,6 +43,12 @@ export function getWebviewHtml(
   <div class="sep"></div>
   <button class="btn" id="btn-analyze-all" disabled>Analyze All</button>
   <div class="sep"></div>
+  <button class="btn active" id="btn-grouping" title="Toggle automatic diff grouping">Grouping: On</button>
+  <div class="sep"></div>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap" title="Show paired .json metadata to the right of each track">
+    <input type="checkbox" id="chk-meta"> JSON
+  </label>
+  <div class="sep"></div>
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap">
     <input type="checkbox" id="chk-waveform"> Waveform
   </label>
