@@ -1,4 +1,4 @@
-[中文文档](https://github.com/RicherMans/SpecView/blob/main/specview-vscode/README.zh-CN.md)
+[中文文档](https://github.com/xingws/SpecView/blob/main/specview-vscode/README.zh-CN.md)
 
 # SpecView - Audio Spectrogram Viewer for VS Code
 

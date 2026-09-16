@@ -73,6 +73,7 @@ export function receiveMetaData(items: { name: string; filePath?: string; text: 
   if (!changed) return;
   metaTreeCache.clear();
   metaLeafCache.clear();
+  invalidateFieldContent();
   for (const t of tracks) {
     const m = metaMap.get(metaKeyOf(t.name, t.filePath)) || metaMap.get(metaKeyOf(t.name)) || null;
     t.meta = m;
@@ -83,6 +84,7 @@ export function receiveMetaData(items: { name: string; filePath?: string; text: 
     if (g.metaPanel) setMetaBody(g.metaPanel.body, active ? active.meta : null);
   }
   ensureStandaloneJsonCards();
+  scheduleReflow();
 }
 
 export function setMetaVisible(v: boolean): void {
@@ -95,7 +97,7 @@ export function setMetaVisible(v: boolean): void {
   }
   if (v) ensureStandaloneJsonCards();
   setStandaloneJsonCardVisibility(v);
-  reflowSpectrograms();
+  scheduleReflow();
 }
 
 /** List of standalone JSON cards (unpaired .json metadata). */
@@ -110,8 +112,19 @@ function isMetaKeyPaired(key: string): boolean {
   return false;
 }
 
-/** Create standalone JSON cards for metaMap keys that do not match any audio. */
+/** Reconcile standalone JSON cards with the current tracks + metaMap: drop
+ *  cards whose key now has matching audio (paired) or is gone from metaMap,
+ *  then create cards for still-unpaired keys. Called after cards are created/
+ *  removed and after metaData arrives, so a json that raced ahead of its audio
+ *  does not linger as a duplicate once the audio track appears. */
 function ensureStandaloneJsonCards(): void {
+  for (let i = jsonCards.length - 1; i >= 0; i--) {
+    const c = jsonCards[i];
+    if (!metaMap.has(c.key) || isMetaKeyPaired(c.key)) {
+      if (c.card) c.card.remove();
+      jsonCards.splice(i, 1);
+    }
+  }
   const have = new Set(jsonCards.map(c => c.key));
   for (const [key, text] of metaMap) {
     if (have.has(key) || isMetaKeyPaired(key)) continue;
@@ -316,6 +329,9 @@ function refreshMetaBodies(): void {
     const active = getActiveLaneOfGroup(g);
     if (g.metaPanel) setMetaBody(g.metaPanel.body, active ? active.meta : null);
   }
+  for (const jc of jsonCards) {
+    setMetaBody(jc.panel.body, metaMap.get(jc.key) ?? null);
+  }
   updateMetaHeads();
 }
 
@@ -348,17 +364,23 @@ function metaValueHtml(parsed: unknown, path: string): string {
   return escMetaText(String(v));
 }
 
-function toggleMetaKey(path: string): void {
-  if (metaSelPaths.has(path)) metaSelPaths.delete(path); else metaSelPaths.add(path);
+function toggleMetaKey(path: string): void { toggleMetaField(path); }
+function removeMetaKey(path: string): void { metaSelPaths.delete(path); commitMetaSel(); }
+function clearMetaSel(): void { metaSelPaths.clear(); commitMetaSel(); }
+
+/** Apply a field-selection change across every panel (tracks, groups and
+ *  standalone JSON cards) and refresh the fields popup if it is open. */
+function commitMetaSel(): void {
+  invalidateFieldState();
   refreshMetaBodies();
+  if (metaPopEl && metaPopEl.classList.contains('open')) buildMetaPopList(metaPopEl, metaPopFilter);
 }
-function removeMetaKey(path: string): void { metaSelPaths.delete(path); refreshMetaBodies(); }
-function clearMetaSel(): void { metaSelPaths.clear(); refreshMetaBodies(); }
 
 function updateMetaHeads(): void {
   const n = metaSelPaths.size;
   for (const t of tracks) { if (t.metaPanel && t.metaPanel.head) updateHead(t.metaPanel.head, n); }
   for (const g of groups) { if (g.metaPanel && g.metaPanel.head) updateHead(g.metaPanel.head, n); }
+  for (const jc of jsonCards) { updateHead(jc.panel.head, n); }
 }
 function updateHead(head: HTMLElement, n: number): void {
   const lbl = head.querySelector('.meta-head-lbl');
@@ -392,11 +414,11 @@ function renderTreeInto(v: unknown, depth: number, out: string[], prefix: string
         try { val && renderTreeInto(JSON.parse(val as string), depth, out, p); continue; }
         catch { /* fallthrough literal */ }
       }
-      out.push(lineHtml(depth, '<span class="js-meta-key" data-path="' + escAttr(p) + '" title="Select field ' + escAttr(p) + '">' + k + '</span>' + ' <span class="jv-punc">{…}</span>'));
+      out.push(lineHtml(depth, '<span class="js-meta-key' + metaKeyStateCls(p) + '" data-path="' + escAttr(p) + '" title="Select field ' + escAttr(p) + '">' + k + '</span>' + ' <span class="jv-punc">{…}</span>'));
       renderTreeInto(val, depth + 1, out, p);
       continue;
     }
-    const keyCls = metaSelPaths.has(p) ? 'jv-key js-meta-key meta-key-on' : 'jv-key js-meta-key';
+    const keyCls = 'jv-key js-meta-key' + metaKeyStateCls(p);
     out.push(lineHtml(depth,
       '<span class="' + keyCls + '" data-path="' + escAttr(p) + '" title="Select field ' + escAttr(p) + '">' + k + '</span>' +
       '<span class="jv-punc">:</span> <span class="jv-str-ish">' + jsonScalarHtml(val) + '</span>'));
@@ -432,7 +454,8 @@ function metaBodyHtml(meta: string | null | undefined): string {
   let parsed: unknown;
   try { parsed = JSON.parse(meta); } catch { parsed = null; }
   const parts: string[] = [];
-  for (const p of metaSelPaths) {
+  const paths = Array.from(metaSelPaths).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  for (const p of paths) {
     parts.push('<div class="meta-sel"><span class="meta-sel-lbl js-meta-key" data-path="' + escAttr(p) + '">' + escMetaText(p) + '</span>' +
       '<div class="meta-sel-val">' + metaValueHtml(parsed, p) + '</div></div>');
   }
@@ -483,25 +506,187 @@ function discoverMetaFields(): Map<string, number> {
     };
     walk(parsed, '');
   };
-  for (const t of tracks) if (t.meta) bump(t.meta);
+  // Every loaded JSON — paired tracks/groups AND standalone JSON cards all live
+  // in metaMap, so a lone .json with no audio still yields its fields.
+  for (const raw of metaMap.values()) bump(raw);
   return m;
 }
-function buildMetaPopList(pop: HTMLElement, filter: string): void {
-  const list = pop.querySelector('.mpo-list') as HTMLElement;
+
+// ---- field tree (hierarchical, leaf-based selection) ----
+interface FieldNode {
+  name: string;           // display segment ("stats" / "[0]")
+  path: string;           // full dotted path ('' for the root)
+  count: number;          // number of loaded files containing this path
+  children: FieldNode[];
+  leaves: string[];       // all leaf paths beneath this node (self if leaf)
+}
+
+let fieldTreeCache: FieldNode | null = null;
+let fieldStateCache: Map<string, 'on' | 'partial'> | null = null;
+let metaPopFilter = '';
+const metaCollapsed = new Set<string>(); // collapsed node paths in the popup
+
+/** Drop the cached field tree — call when the loaded JSON content changes. */
+function invalidateFieldContent(): void { fieldTreeCache = null; fieldStateCache = null; }
+/** Drop only the cached selection state — call when the selection changes. */
+function invalidateFieldState(): void { fieldStateCache = null; }
+
+function buildFieldTree(): FieldNode {
   const fields = discoverMetaFields();
-  const names = Array.from(fields.keys()).sort();
-  const q = filter.trim().toLowerCase();
-  let html = '';
-  for (const n of names) {
-    if (q && !n.toLowerCase().includes(q)) continue;
-    html += '<label class="mpo-item"><input type="checkbox" data-path="' + escAttr(n) + '"' + (metaSelPaths.has(n) ? ' checked' : '') + ' />' +
-      '<span class="mpo-name">' + escMetaText(n) + '</span>' +
-      '<span class="mpo-count">' + fields.get(n) + '</span></label>';
+  const root: FieldNode = { name: '', path: '', count: 0, children: [], leaves: [] };
+  const byPath = new Map<string, FieldNode>([['', root]]);
+  const ensure = (path: string): FieldNode => {
+    const hit = byPath.get(path);
+    if (hit) return hit;
+    const parts = path.split('.');
+    const last = parts[parts.length - 1];
+    const parent = ensure(parts.slice(0, -1).join('.'));
+    const node: FieldNode = {
+      name: /^\d+$/.test(last) ? '[' + last + ']' : last,
+      path, count: 0, children: [], leaves: [],
+    };
+    parent.children.push(node);
+    byPath.set(path, node);
+    return node;
+  };
+  for (const p of fields.keys()) ensure(p);
+  for (const [p, c] of fields) { const n = byPath.get(p); if (n) n.count = c; }
+  const computeLeaves = (n: FieldNode): void => {
+    if (n.children.length === 0) { n.leaves = n.path ? [n.path] : []; return; }
+    n.leaves = [];
+    n.children.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    for (const c of n.children) { computeLeaves(c); n.leaves.push(...c.leaves); }
+  };
+  computeLeaves(root);
+  return root;
+}
+
+function getFieldTree(): FieldNode {
+  if (!fieldTreeCache) fieldTreeCache = buildFieldTree();
+  return fieldTreeCache;
+}
+
+/** Selection state of a node derived from its leaf paths. */
+function nodeLeafState(node: FieldNode): 'on' | 'off' | 'partial' {
+  if (node.leaves.length === 0) return 'off';
+  let on = 0;
+  for (const p of node.leaves) if (metaSelPaths.has(p)) on++;
+  if (on === 0) return 'off';
+  return on === node.leaves.length ? 'on' : 'partial';
+}
+
+function setNodeLeaves(node: FieldNode, on: boolean): void {
+  for (const p of node.leaves) { if (on) metaSelPaths.add(p); else metaSelPaths.delete(p); }
+}
+
+/** Cascade-toggle a node: fully-selected -> clear its leaves, else select them. */
+function toggleFieldNode(node: FieldNode): void {
+  setNodeLeaves(node, nodeLeafState(node) !== 'on');
+  commitMetaSel();
+}
+
+function findFieldNode(root: FieldNode, path: string): FieldNode | null {
+  if (!path) return root;
+  let cur = root;
+  for (const part of path.split('.')) {
+    const next = cur.children.find(c => c.path === (cur.path ? cur.path + '.' + part : part));
+    if (!next) return null;
+    cur = next;
   }
-  if (!html) html = '<div class="mpo-empty">' + (filter ? 'No matching fields' : 'No JSON fields loaded — open a .json first.') + '</div>';
-  list.innerHTML = html;
+  return cur;
+}
+
+/** Toggle a field path (from a JSON body key). Non-leaf nodes cascade to their
+ *  leaves; leaf paths toggle exactly. */
+function toggleMetaField(path: string): void {
+  const node = findFieldNode(getFieldTree(), path);
+  if (node) toggleFieldNode(node);
+  else if (metaSelPaths.has(path)) { metaSelPaths.delete(path); commitMetaSel(); }
+  else { metaSelPaths.add(path); commitMetaSel(); }
+}
+
+/** Map of path -> 'on' | 'partial' for highlight in the JSON body. */
+function getFieldStates(): Map<string, 'on' | 'partial'> {
+  if (!fieldStateCache) {
+    const m = new Map<string, 'on' | 'partial'>();
+    const walk = (n: FieldNode): void => {
+      if (n.path) { const st = nodeLeafState(n); if (st !== 'off') m.set(n.path, st); }
+      for (const c of n.children) walk(c);
+    };
+    walk(getFieldTree());
+    fieldStateCache = m;
+  }
+  return fieldStateCache;
+}
+
+/** Extra class for a JSON key based on its (possibly partial) selection state. */
+function metaKeyStateCls(path: string): string {
+  const st = getFieldStates().get(path);
+  return st === 'on' ? ' meta-key-on' : st === 'partial' ? ' meta-key-partial' : '';
+}
+
+function fieldNodeMatches(node: FieldNode, q: string): boolean {
+  if (!q) return true;
+  if (node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q)) return true;
+  return node.children.some(c => fieldNodeMatches(c, q));
+}
+
+function renderFieldNode(node: FieldNode, depth: number, q: string): string {
+  if (!fieldNodeMatches(node, q)) return '';
+  const state = nodeLeafState(node);
+  const hasKids = node.children.length > 0;
+  const collapsed = metaCollapsed.has(node.path);
+  const caret = hasKids
+    ? '<span class="mpo-caret" data-caret="' + escAttr(node.path) + '">' + (collapsed ? '&#9654;' : '&#9660;') + '</span>'
+    : '<span class="mpo-caret mpo-caret-empty"></span>';
+  let html = '<div class="mpo-node" style="padding-left:' + (depth * 14) + 'px">' + caret +
+    '<label class="mpo-lbl"><input type="checkbox" data-path="' + escAttr(node.path) + '"' +
+    (state === 'on' ? ' checked' : '') + ' data-partial="' + (state === 'partial' ? '1' : '0') + '" />' +
+    '<span class="mpo-name">' + escMetaText(node.name) + '</span></label>' +
+    '<span class="mpo-count">' + node.count + '</span></div>';
+  if (hasKids && !collapsed) {
+    for (const c of node.children) html += renderFieldNode(c, depth + 1, q);
+  }
+  return html;
+}
+
+function buildMetaPopList(pop: HTMLElement, filter: string): void {
+  metaPopFilter = filter;
+  const list = pop.querySelector('.mpo-list') as HTMLElement;
+  const root = getFieldTree();
+  const q = filter.trim().toLowerCase();
+  const allState = nodeLeafState(root);
+  const allRow = '<label class="mpo-item mpo-all"><input type="checkbox" data-all="1"' +
+    (allState === 'on' ? ' checked' : '') + ' data-partial="' + (allState === 'partial' ? '1' : '0') + '" />' +
+    '<span class="mpo-name">All fields</span><span class="mpo-count">' + root.leaves.length + '</span></label>';
+  let tree = '';
+  for (const c of root.children) tree += renderFieldNode(c, 0, q);
+  if (!tree) {
+    list.innerHTML = allRow + '<div class="mpo-empty">' +
+      (q ? 'No matching fields' : 'No JSON fields loaded — open a .json first.') + '</div>';
+    return;
+  }
+  list.innerHTML = allRow + tree;
+  list.querySelectorAll<HTMLInputElement>('input[data-partial="1"]').forEach(cb => { cb.indeterminate = true; });
+  const allCb = list.querySelector<HTMLInputElement>('input[data-all]');
+  if (allCb) allCb.addEventListener('change', () => {
+    const on = nodeLeafState(root) === 'on';
+    setNodeLeaves(root, !on);
+    commitMetaSel();
+  });
   list.querySelectorAll<HTMLInputElement>('input[data-path]').forEach(cb => {
-    cb.addEventListener('change', () => { const p = cb.dataset.path || ''; toggleMetaKey(p); });
+    cb.addEventListener('change', () => {
+      const node = findFieldNode(getFieldTree(), cb.dataset.path || '');
+      if (node) toggleFieldNode(node);
+    });
+  });
+  list.querySelectorAll('.mpo-caret[data-caret]').forEach(caret => {
+    caret.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      const p = (caret as HTMLElement).dataset.caret || '';
+      if (metaCollapsed.has(p)) metaCollapsed.delete(p); else metaCollapsed.add(p);
+      buildMetaPopList(pop, metaPopFilter);
+    });
   });
 }
 function toggleMetaPop(anchor: HTMLElement): void {
@@ -631,6 +816,7 @@ function rebuildBodyAsMulti(t: Track): void {
   } else {
     card.appendChild(body);
   }
+  scheduleReflow(); // lane layout/height changed → re-fit JSON panel caps
 }
 
 /** Remove a now-multichannel member from its diff group (multichannel files are
@@ -1477,6 +1663,7 @@ export function setWaveformVisible(visible: boolean): void {
       drawWaveform(t);
     }
   }
+  scheduleReflow(); // audio height changed → re-fit JSON panel caps
 }
 
 export function isWaveformVisible(): boolean {
@@ -1789,7 +1976,7 @@ function createStandalone(name: string, buffer: AudioBuffer | null, nativeSR: nu
   left.appendChild(buildRuler(t));
   row.appendChild(left);
   const panel = buildMetaPanel();
-  const resizer = makeMetaResizer(row, () => { refreshMetaWindow(); reflowSpectrograms(); });
+  const resizer = makeMetaResizer(row, () => { refreshMetaWindow(); scheduleReflow(); });
   row.appendChild(resizer);
   row.appendChild(panel.aside);
   card.appendChild(row);
@@ -1880,7 +2067,7 @@ function createDiffGroup(baseName: string, items: DecodedItem[]): HTMLElement {
   left.appendChild(cols);
   row.appendChild(left);
   const panel = buildMetaPanel();
-  const resizer = makeMetaResizer(row, () => { refreshMetaWindow(); reflowSpectrograms(); });
+  const resizer = makeMetaResizer(row, () => { refreshMetaWindow(); scheduleReflow(); });
   row.appendChild(resizer);
   row.appendChild(panel.aside);
   card.appendChild(row);
@@ -2054,6 +2241,8 @@ export function refreshUI(): void {
   highlightActive();
   updateLaneHighlights();
   updateTimeDisplay();
+  ensureStandaloneJsonCards(); // prune/refresh standalone JSON cards against current tracks
+  scheduleReflow();
 }
 
 /** Toggle a per-track analysis result strip between expanded / collapsed. If
@@ -2388,6 +2577,7 @@ export function clearAll(): void {
   metaSource.clear();
   metaTreeCache.clear();
   metaLeafCache.clear();
+  invalidateFieldContent();
   loadQueue.length = 0;
   activeLoads = 0;
   lazyObserver.disconnect();
@@ -2674,6 +2864,68 @@ export function initUI(): void {
   });
 }
 
+/** Defer a reflow to the next animation frame. Toggling the JSON panel only
+ *  changes layout via a class change, so measuring width synchronously in the
+ *  same task can still read the pre-toggle width; a frame boundary guarantees
+ *  the new flex layout has been applied. Coalesces bursts into one reflow. */
+let reflowRaf: number | null = null;
+function scheduleReflow(): void {
+  if (reflowRaf != null) return;
+  reflowRaf = requestAnimationFrame(() => {
+    reflowRaf = null;
+    reflowSpectrograms();
+  });
+}
+
+/** Content height of a standard single-view wav card's audio column, measured
+ *  with its row un-stretched. Falls back to the fixed spec height. */
+function standardCardContentHeight(): number {
+  for (const t of tracks) {
+    if (t.groupId != null || isMultiTrack(t) || !t.el) continue;
+    const left = t.el.querySelector('.card-left') as HTMLElement | null;
+    if (left && left.offsetHeight > 0) return left.offsetHeight;
+  }
+  return SPEC_H + 16; // spec row + time ruler
+}
+
+/** Cap JSON panel heights so they never exceed the audio content beside them:
+ *  a paired panel matches its own card's audio column, and a standalone JSON
+ *  card matches a standard wav card. Content beyond the cap scrolls inside
+ *  .meta-body. Re-measured on every reflow (window resize / panel toggle).
+ *
+ *  `.card-row` stretches items, so a tall JSON panel would otherwise stretch
+ *  `.card-left` too — making its offsetHeight useless as a cap. We momentarily
+ *  un-stretch every panel row to read the audio column's natural height, then
+ *  apply the caps. No paint happens between measure and restore. */
+function syncMetaHeights(): void {
+  const entries: { aside: HTMLElement; left: HTMLElement | null; shown: boolean }[] = [];
+  const collect = (panel: { aside: HTMLElement } | null | undefined): void => {
+    if (!panel) return;
+    const aside = panel.aside;
+    const row = aside.parentElement;
+    const left = row ? row.querySelector(':scope > .card-left') as HTMLElement | null : null;
+    entries.push({ aside, left, shown: aside.classList.contains('show') });
+  };
+  for (const t of tracks) collect(t.metaPanel);
+  for (const g of groups) collect(g.metaPanel);
+
+  const rows = new Set<HTMLElement>();
+  for (const e of entries) { const r = e.aside.parentElement; if (r) rows.add(r); }
+  for (const r of rows) r.classList.add('no-stretch');
+  const heights = new Map<HTMLElement, number>();
+  for (const e of entries) if (e.left) heights.set(e.left, e.left.offsetHeight);
+  const standaloneH = standardCardContentHeight();
+  for (const r of rows) r.classList.remove('no-stretch');
+
+  for (const e of entries) {
+    const h = e.left ? (heights.get(e.left) || 0) : 0;
+    e.aside.style.maxHeight = (e.shown && h > 0) ? h + 'px' : '';
+  }
+  for (const jc of jsonCards) {
+    jc.panel.aside.style.maxHeight = standaloneH > 0 ? standaloneH + 'px' : '';
+  }
+}
+
 /** Re-sync every loaded track's canvas backing width to its wrapper's current
  *  layout width, then re-draw from the cached spectrum (no FFT recompute).
  *  Used after the JSON panel toggles or is resized, since those layout changes
@@ -2703,4 +2955,5 @@ function reflowSpectrograms(): void {
     updateRuler(t);
   }
   updatePlayheads();
+  syncMetaHeights();
 }

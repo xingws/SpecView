@@ -364,6 +364,9 @@ body {
 
 /* ===== PAIRED JSON METADATA PANEL ===== */
 .card-row { display: flex; align-items: stretch; min-width: 0; }
+/* Temporarily applied by syncMetaHeights so .card-left reports its natural
+   height (not stretched by a tall JSON panel) while measuring. */
+.card-row.no-stretch { align-items: flex-start; }
 .card-left { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 
 /* Standalone JSON card (unpaired .json shown on its own) */
@@ -375,6 +378,7 @@ body {
   border-left: none;
   border-top: 1px solid #333;
   min-height: 220px;
+  max-height: 236px;   /* fallback; JS syncMetaHeights matches a wav card height */
 }
 .json-card .meta-body { font-size: 12px; padding: 8px 10px; }
 
@@ -437,6 +441,7 @@ body.meta-sel .meta-clear { display: inline-block; }
 .js-meta-key { cursor: pointer; border-radius: 3px; }
 .js-meta-key:hover { background: #e3ecf9; color: #063d78; }
 .meta-key-on { background: #d6e4f5; color: #063d78; }
+.meta-key-partial { background: #eef4fb; color: #063d78; outline: 1px dashed #9cc0e8; outline-offset: -1px; }
 .meta-sel { border: 1px solid #333; border-radius: 4px; padding: 4px 6px; margin-bottom: 6px; }
 .meta-sel-lbl {
   display: inline-block; cursor: pointer; background: #d6e4f5; color: #063d78;
@@ -461,6 +466,15 @@ body.meta-sel .meta-clear { display: inline-block; }
 .mpo-search { margin: 6px 8px; padding: 3px 6px; font-size: 11px; border: 1px solid var(--border); border-radius: 3px; background: #1a1a1a; color: var(--text); }
 .mpo-list { flex: 1; overflow: auto; padding: 0 8px 8px; }
 .mpo-item { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 0; cursor: pointer; }
+.mpo-all { border-bottom: 1px solid var(--border-light); margin-bottom: 4px; padding-bottom: 4px; font-weight: 600; }
+.mpo-node { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 1px 0; }
+.mpo-lbl { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; cursor: pointer; }
+.mpo-caret {
+  width: 12px; flex-shrink: 0; text-align: center; font-size: 8px;
+  color: var(--text-sub); cursor: pointer; user-select: none;
+}
+.mpo-caret-empty { cursor: default; visibility: hidden; }
+.mpo-node .mpo-name { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mpo-name { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mpo-count { color: var(--text-sub); font-size: 10px; }
 .mpo-foot { padding: 4px 8px; border-top: 1px solid var(--border-light); }

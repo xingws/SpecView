@@ -390,27 +390,29 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
     const audioUris = newUris.filter(uri =>
       !isArchive(path.basename(uri.fsPath)) && !/\.json$/i.test(path.basename(uri.fsPath)));
 
-    // Send .json files as metadata (paired by same stem, or standalone JSON card).
-    if (metaUris.length > 0) {
-      const items: { name: string; filePath: string; text: string }[] = [];
-      for (const uri of metaUris) {
-        try {
-          const raw = await vscode.workspace.fs.readFile(uri);
-          if (raw.byteLength > (4 << 20)) continue; // too big for metadata
-          items.push({
-            name: path.basename(uri.fsPath),
-            filePath: uri.fsPath,
-            text: Buffer.from(raw).toString('utf8'),
-          });
-        } catch (e) {
-          console.error('Failed to read JSON:', uri.fsPath, e);
-        }
-      }
-      if (items.length > 0) {
-        webviewPanel.webview.postMessage({ type: 'metaData', items });
-        for (const uri of metaUris) this.loadedFiles.add(uri.fsPath);
+    // Read .json files now, but post them AFTER the audio so the webview has
+    // the (lazy) audio tracks when metaData arrives — otherwise a same-stem
+    // json would first render as a standalone card and duplicate its audio's
+    // paired panel.
+    const metaItems: { name: string; filePath: string; text: string }[] = [];
+    for (const uri of metaUris) {
+      try {
+        const raw = await vscode.workspace.fs.readFile(uri);
+        if (raw.byteLength > (4 << 20)) continue; // too big for metadata
+        metaItems.push({
+          name: path.basename(uri.fsPath),
+          filePath: uri.fsPath,
+          text: Buffer.from(raw).toString('utf8'),
+        });
+      } catch (e) {
+        console.error('Failed to read JSON:', uri.fsPath, e);
       }
     }
+    const postMeta = () => {
+      if (metaItems.length === 0) return;
+      webviewPanel.webview.postMessage({ type: 'metaData', items: metaItems });
+      for (const uri of metaUris) this.loadedFiles.add(uri.fsPath);
+    };
 
     // Extract audio files from archives (lazy loading for large archives)
     for (const archiveUri of archiveUris) {
@@ -465,7 +467,7 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
       }
     }
 
-    if (audioUris.length === 0) return;
+    if (audioUris.length === 0) { postMeta(); return; }
 
     for (const uri of audioUris) this.loadedFiles.add(uri.fsPath);
     this.lastOpenDir = vscode.Uri.joinPath(audioUris[audioUris.length - 1], '..');
@@ -492,6 +494,9 @@ export class SpecViewEditorProvider implements vscode.CustomReadonlyEditorProvid
       // Small batch: send one-by-one to avoid a single massive postMessage payload
       await this.sendAudioFilesOneByOne(webviewPanel, audioUris);
     }
+
+    // Audio messages are queued first, so metaData pairs with existing tracks.
+    postMeta();
   }
 
   /**

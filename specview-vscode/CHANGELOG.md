@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.1
+
+### Bug Fixes
+
+- Fixed the **fields** browser being empty when a `.json` is opened on its own (no audio). Field discovery now reads every loaded JSON, and standalone JSON cards re-render when a field is selected.
+- Fixed a `.json` appearing as a duplicate standalone card alongside its paired track when a wav and its same-stem json are opened together. Standalone cards are now reconciled against the loaded tracks, and metadata is sent after the audio.
+- Fixed the spectrogram not re-scaling when the JSON toggle is switched on/off (the canvas reflow is now deferred a frame so it reads the post-toggle width).
+- Paired JSON panels and standalone JSON cards are now height-capped to their audio card and scroll internally instead of growing the card.
+
+### Improvements
+
+- The **fields** popup is now a hierarchical tree: parent nodes are tri-state checkboxes that select/clear all their descendants, an **All fields** row selects everything, nodes can be collapsed, and the search filters branches.
+
 ## 0.2.0
 
 ### New Features

@@ -2,17 +2,17 @@
   "name": "specview",
   "displayName": "SpecView - Audio Spectrogram Viewer",
   "description": "Audio spectrogram viewer for audio analysis: play & compare audio files (WAV/MP3/FLAC/OGG), auto A/B diff grouping, and ML-powered audio classification",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "sunxingwei",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/RicherMans/SpecView"
+    "url": "https://github.com/xingws/SpecView"
   },
-  "homepage": "https://github.com/RicherMans/SpecView",
+  "homepage": "https://github.com/xingws/SpecView",
   "bugs": {
-    "url": "https://github.com/RicherMans/SpecView/issues"
+    "url": "https://github.com/xingws/SpecView/issues"
   },
   "engines": {
     "vscode": "^1.85.0"
